@@ -17,3 +17,8 @@ output "navigation_service_base_url" {
   description = "Base URL apps and deploy scripts can use for navigation-service."
   value       = "http://${data.terraform_remote_state.personal.outputs.ec2_instance_ip}:${var.navigation_service_port}"
 }
+
+output "navigation_service_data_volume_id" {
+  description = "Encrypted EBS volume ID mounted at /data for SQLite persistence."
+  value       = aws_ebs_volume.navigation_service_data.id
+}
