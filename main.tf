@@ -61,12 +61,12 @@ locals {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "navigation_service_from_shared_sg" {
-  description                  = "Allow navigation-service traffic on shared EC2 security group."
-  security_group_id            = data.terraform_remote_state.personal.outputs.ec2_security_group_id
-  referenced_security_group_id = data.terraform_remote_state.personal.outputs.ec2_security_group_id
-  from_port                    = var.navigation_service_port
-  to_port                      = var.navigation_service_port
-  ip_protocol                  = "tcp"
+  description       = "Allow navigation-service traffic from client source CIDR."
+  security_group_id = data.terraform_remote_state.personal.outputs.ec2_security_group_id
+  cidr_ipv4         = var.navigation_service_client_cidr_ipv4
+  from_port         = var.navigation_service_port
+  to_port           = var.navigation_service_port
+  ip_protocol       = "tcp"
 }
 
 resource "aws_ebs_volume" "navigation_service_data" {

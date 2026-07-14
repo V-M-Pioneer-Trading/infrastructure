@@ -20,6 +20,12 @@ variable "navigation_service_port" {
   default     = 8080
 }
 
+variable "navigation_service_client_cidr_ipv4" {
+  description = "Client IPv4 CIDR allowed to reach navigation-service port on shared EC2 security group."
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
 variable "navigation_service_image" {
   description = "Container image (with tag) used for navigation-service."
   type        = string
