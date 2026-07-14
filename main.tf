@@ -74,12 +74,68 @@ resource "aws_ebs_volume" "navigation_service_data" {
   encrypted         = true
   size              = var.navigation_service_data_volume_size_gb
   type              = "gp3"
+
+  tags = {
+    Backup = "navigation-service-daily"
+  }
 }
 
 resource "aws_volume_attachment" "navigation_service_data" {
   device_name = "/dev/xvdf"
   volume_id   = aws_ebs_volume.navigation_service_data.id
   instance_id = var.ec2_instance_id
+}
+
+# ============================================================
+# Daily EBS snapshots for the nav.db data volume (7-day retention)
+# ============================================================
+
+resource "aws_iam_role" "dlm_lifecycle" {
+  name = "navigation-service-dlm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "dlm.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "dlm_lifecycle" {
+  role       = aws_iam_role.dlm_lifecycle.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
+}
+
+resource "aws_dlm_lifecycle_policy" "navigation_service_data" {
+  description        = "Daily snapshots for navigation-service EBS data volume"
+  execution_role_arn = aws_iam_role.dlm_lifecycle.arn
+  state              = "ENABLED"
+
+  policy_details {
+    resource_types = ["VOLUME"]
+
+    target_tags = {
+      Backup = "navigation-service-daily"
+    }
+
+    schedule {
+      name = "daily-snapshot"
+
+      create_rule {
+        interval      = 24
+        interval_unit = "HOURS"
+        times         = ["03:00"]
+      }
+
+      retain_rule {
+        count = 7
+      }
+
+      copy_tags = true
+    }
+  }
 }
 
 resource "aws_ssm_document" "navigation_service_bootstrap" {
