@@ -6,7 +6,7 @@ Terraform for navigation-service infrastructure in `V-M-Pioneer-Trading/infrastr
 
 - Reads shared EC2 state from personal infra remote state at `personal/terraform.tfstate`.
 - Reuses outputs `ec2_instance_ip` and `ec2_security_group_id`.
-- Adds navigation-service ingress on port `8080` to shared EC2 security group.
+- Adds navigation-service ingress on port `8080` to shared EC2 security group from configured client IPv4 CIDR (`0.0.0.0/0` by default).
 - Creates encrypted EBS data volume and attaches it to shared EC2 host.
 - Boots navigation-service directly on shared EC2 instance with AWS SSM.
 - Exposes deployment-friendly outputs for EC2 IP and service base URL.
@@ -22,6 +22,7 @@ SQLite is local to EC2 host at `/data/nav.db` and not decoupled into managed dat
 - `ec2_instance_id`: Shared EC2 instance ID targeted by SSM bootstrap command.
 - `aws_region`: AWS region for both this stack and remote-state lookup. Default: `eu-central-1`.
 - `navigation_service_port`: navigation-service port. Default: `8080`.
+- `navigation_service_client_cidr_ipv4`: client IPv4 CIDR allowed to call navigation-service on `navigation_service_port`. Default: `0.0.0.0/0`.
 - `navigation_service_image`: container image and tag for navigation-service. Default: `ghcr.io/v-m-pioneer-trading/navigation-service:latest`.
 - `navigation_service_data_volume_size_gb`: encrypted EBS size for `/data`. Default: `10`.
 
@@ -56,5 +57,5 @@ terraform validate
 ## Assumptions
 
 - Shared EC2 instance has SSM agent available and IAM permissions for SSM command execution.
-- Existing security group rule for port `8080` remains in place for external reachability via EC2 IP/base URL.
+- `navigation_service_client_cidr_ipv4` is set to expected caller network for this environment. Default allows internet clients over IPv4.
 - Data volume is intentionally standalone EBS resource, so it is not tied to root disk lifecycle.
