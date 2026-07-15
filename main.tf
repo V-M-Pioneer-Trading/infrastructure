@@ -19,6 +19,7 @@ data "aws_instance" "navigation_service_host" {
 locals {
   navigation_service_bootstrap_commands = [
     "set -euo pipefail",
+    "cloud-init status --wait >/dev/null 2>&1 || true",
     "DATA_DEVICE_SYMLINK=\"/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${replace(aws_ebs_volume.navigation_service_data.id, "-", "")}\"",
     "DATA_DEVICE=\"\"",
     "for _ in $(seq 1 30); do",
@@ -54,6 +55,7 @@ locals {
     "  fi",
     "fi",
     "systemctl enable --now docker",
+    "aws ssm get-parameter --region ${var.aws_region} --name navigation-service-ghcr-pat --with-decryption --query Parameter.Value --output text | docker login ghcr.io -u ${var.navigation_service_ghcr_username} --password-stdin",
     "docker pull ${var.navigation_service_image}",
     "docker rm -f navigation-service >/dev/null 2>&1 || true",
     "docker run -d --name navigation-service --restart unless-stopped -p ${var.navigation_service_port}:8080 -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod ${var.navigation_service_image}",

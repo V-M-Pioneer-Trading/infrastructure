@@ -32,6 +32,12 @@ variable "navigation_service_image" {
   default     = "ghcr.io/v-m-pioneer-trading/navigation-service:latest"
 }
 
+variable "navigation_service_ghcr_username" {
+  description = "GitHub username used to authenticate to ghcr.io when pulling the (private) navigation-service image. The token itself lives in SSM Parameter Store (navigation-service-ghcr-pat), created out-of-band."
+  type        = string
+  default     = "mradomsky"
+}
+
 variable "navigation_service_data_volume_size_gb" {
   description = "Size in GiB for encrypted EBS volume mounted at /data."
   type        = number
