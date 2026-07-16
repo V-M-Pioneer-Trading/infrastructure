@@ -55,17 +55,20 @@ locals {
     "  fi",
     "fi",
     "systemctl enable --now docker",
-    "aws ssm get-parameter --region ${var.aws_region} --name navigation-service-ghcr-pat --with-decryption --query Parameter.Value --output text | docker login ghcr.io -u ${var.navigation_service_ghcr_username} --password-stdin",
     "docker pull ${var.navigation_service_image}",
     "docker rm -f navigation-service >/dev/null 2>&1 || true",
-    "docker run -d --name navigation-service --restart unless-stopped -p ${var.navigation_service_port}:8080 -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod ${var.navigation_service_image}",
+    "docker run -d --name navigation-service --restart unless-stopped -p ${var.navigation_service_port}:8080 -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} ${var.navigation_service_image}",
   ]
 }
 
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
 resource "aws_vpc_security_group_ingress_rule" "navigation_service_from_shared_sg" {
-  description       = "Allow navigation-service traffic from client source CIDR."
+  description       = "Allow navigation-service traffic from CloudFront only."
   security_group_id = data.terraform_remote_state.personal.outputs.ec2_security_group_id
-  cidr_ipv4         = var.navigation_service_client_cidr_ipv4
+  prefix_list_id    = data.aws_ec2_managed_prefix_list.cloudfront.id
   from_port         = var.navigation_service_port
   to_port           = var.navigation_service_port
   ip_protocol       = "tcp"
