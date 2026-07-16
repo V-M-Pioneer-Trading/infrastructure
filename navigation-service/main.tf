@@ -57,7 +57,7 @@ locals {
     "systemctl enable --now docker",
     "docker pull ${var.navigation_service_image}",
     "docker rm -f navigation-service >/dev/null 2>&1 || true",
-    "docker run -d --name navigation-service --restart unless-stopped -p ${var.navigation_service_port}:8080 -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod ${var.navigation_service_image}",
+    "docker run -d --name navigation-service --restart unless-stopped -p ${var.navigation_service_port}:8080 -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} ${var.navigation_service_image}",
   ]
 }
 
