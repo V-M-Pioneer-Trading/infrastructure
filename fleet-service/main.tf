@@ -22,18 +22,10 @@ data "terraform_remote_state" "agent_service" {
   }
 }
 
-data "aws_ec2_managed_prefix_list" "cloudfront" {
-  name = "com.amazonaws.global.cloudfront.origin-facing"
-}
-
-resource "aws_vpc_security_group_ingress_rule" "fleet_service_from_cloudfront" {
-  description       = "Allow fleet-service traffic from CloudFront only."
-  security_group_id = data.terraform_remote_state.personal.outputs.ec2_security_group_id
-  prefix_list_id    = data.aws_ec2_managed_prefix_list.cloudfront.id
-  from_port         = var.fleet_service_port
-  to_port           = var.fleet_service_port
-  ip_protocol       = "tcp"
-}
+# No dedicated ingress rule here — navigation-service's stack owns a single shared rule
+# covering all three backend ports (80/agent, 3001/fleet, 8080/navigation) from CloudFront's
+# prefix list, since a separate rule per service exceeded the account's rules-per-security-group
+# quota (that quota counts a prefix-list rule by the list's entry count, not as a flat 1).
 
 locals {
   fleet_service_bootstrap_commands = [

@@ -65,12 +65,16 @@ data "aws_ec2_managed_prefix_list" "cloudfront" {
   name = "com.amazonaws.global.cloudfront.origin-facing"
 }
 
-resource "aws_vpc_security_group_ingress_rule" "navigation_service_from_shared_sg" {
-  description       = "Allow navigation-service traffic from CloudFront only."
+// Covers navigation-service (8080), agent-service (80), and fleet-service (3001) in one rule.
+// AWS's "rules per security group" quota counts a prefix-list-referencing rule by that list's
+// entry count (45 for CloudFront's), not as a flat 1 — a separate rule per service exceeded the
+// default 60-rule quota, so all three backend ports share this single rule instead.
+resource "aws_vpc_security_group_ingress_rule" "shared_backend_ports_from_cloudfront" {
+  description       = "Allow navigation/agent/fleet-service traffic from CloudFront only."
   security_group_id = data.terraform_remote_state.personal.outputs.ec2_security_group_id
   prefix_list_id    = data.aws_ec2_managed_prefix_list.cloudfront.id
-  from_port         = var.navigation_service_port
-  to_port           = var.navigation_service_port
+  from_port         = 80
+  to_port           = 8080
   ip_protocol       = "tcp"
 }
 

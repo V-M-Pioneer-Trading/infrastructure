@@ -16,10 +16,6 @@ data "aws_instance" "agent_service_host" {
   instance_id = var.ec2_instance_id
 }
 
-data "aws_ec2_managed_prefix_list" "cloudfront" {
-  name = "com.amazonaws.global.cloudfront.origin-facing"
-}
-
 # KMS resource-based matching needs the key ARN, not the alias ARN.
 data "aws_kms_alias" "ssm" {
   name = "alias/aws/ssm"
@@ -73,14 +69,10 @@ resource "aws_iam_role_policy" "shared_ec2_agent_service_ssm_parameters" {
   })
 }
 
-resource "aws_vpc_security_group_ingress_rule" "agent_service_from_cloudfront" {
-  description       = "Allow agent-service traffic from CloudFront only."
-  security_group_id = data.terraform_remote_state.personal.outputs.ec2_security_group_id
-  prefix_list_id    = data.aws_ec2_managed_prefix_list.cloudfront.id
-  from_port         = var.agent_service_port
-  to_port           = var.agent_service_port
-  ip_protocol       = "tcp"
-}
+// No dedicated ingress rule here — navigation-service's stack owns a single shared rule
+// covering all three backend ports (80/agent, 3001/fleet, 8080/navigation) from CloudFront's
+// prefix list, since a separate rule per service exceeded the account's rules-per-security-group
+// quota (that quota counts a prefix-list rule by the list's entry count, not as a flat 1).
 
 resource "aws_ebs_volume" "agent_service_mysql_data" {
   availability_zone = data.aws_instance.agent_service_host.availability_zone
