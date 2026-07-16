@@ -31,3 +31,9 @@ variable "navigation_service_data_volume_size_gb" {
   type        = number
   default     = 10
 }
+
+variable "cors_allowed_origin" {
+  description = "Origin allowed to call navigation-service via CORS in production."
+  type        = string
+  default     = "https://spacetraders.radomskyi.com"
+}
