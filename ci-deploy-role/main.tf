@@ -27,13 +27,23 @@ data "aws_iam_policy_document" "github_ssm_deploy_trust" {
       values   = ["sts.amazonaws.com"]
     }
 
+    # GitHub's OIDC subject sometimes includes immutable org/repo IDs appended via "@"
+    # (e.g. "repo:ORG@171620707/REPO@1301535652:ref:...") instead of the plain
+    # "repo:ORG/REPO:ref:..." form - hit an AccessDenied on fleet-service's CI using only the
+    # plain form, even though this same pattern worked for agent-service (confirmed via
+    # CloudTrail). Pinning both exact forms per service instead of wildcarding to keep the
+    # trust boundary tight. Org ID 171620707; repo IDs: navigation-service 813281107,
+    # agent-service 810497500, fleet-service 1301535652.
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:V-M-Pioneer-Trading/navigation-service:*",
-        "repo:V-M-Pioneer-Trading/agent-service:*",
-        "repo:V-M-Pioneer-Trading/fleet-service:*",
+        "repo:V-M-Pioneer-Trading/navigation-service:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading@171620707/navigation-service@813281107:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading/agent-service:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading@171620707/agent-service@810497500:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading/fleet-service:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading@171620707/fleet-service@1301535652:ref:refs/heads/main",
       ]
     }
   }
