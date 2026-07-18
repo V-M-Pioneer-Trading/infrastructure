@@ -37,3 +37,15 @@ variable "cors_allowed_origin" {
   type        = string
   default     = "https://spacetraders.radomskyi.com"
 }
+
+variable "gateway_image" {
+  description = "Container image (with tag) used for st-gateway."
+  type        = string
+  default     = "ghcr.io/v-m-pioneer-trading/st-gateway:latest"
+}
+
+variable "gateway_port" {
+  description = "Port st-gateway listens on."
+  type        = number
+  default     = 3002
+}

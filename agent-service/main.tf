@@ -187,9 +187,12 @@ locals {
     "docker rm -f agent-service-mysql >/dev/null 2>&1 || true",
     "docker run -d --name agent-service-mysql --restart unless-stopped --network host -v /data/agent-service-mysql:/var/lib/mysql -e MYSQL_ROOT_PASSWORD=\"$MYSQL_ROOT_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" mysql:latest",
     "for _ in $(seq 1 30); do docker exec agent-service-mysql mysqladmin ping -h localhost -u root -p\"$MYSQL_ROOT_PASSWORD\" >/dev/null 2>&1 && break; sleep 5; done",
+    "docker pull ${var.gateway_image}",
+    "docker rm -f st-gateway >/dev/null 2>&1 || true",
+    "docker run -d --name st-gateway --restart unless-stopped --network host -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 ${var.gateway_image}",
     "docker pull ${var.agent_service_image}",
     "docker rm -f agent-service >/dev/null 2>&1 || true",
-    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} ${var.agent_service_image}",
+    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} ${var.agent_service_image}",
   ]
 }
 
