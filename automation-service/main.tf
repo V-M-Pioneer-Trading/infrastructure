@@ -184,6 +184,10 @@ locals {
     "DATA_UUID=$(blkid -s UUID -o value \"$DATA_DEVICE\")",
     "grep -q \"^UUID=$DATA_UUID /data/automation-service-postgres \" /etc/fstab || echo \"UUID=$DATA_UUID /data/automation-service-postgres ext4 defaults,nofail 0 2\" >> /etc/fstab",
     "mountpoint -q /data/automation-service-postgres || mount /data/automation-service-postgres",
+    // Postgres's initdb refuses to run against a non-empty directory, and a freshly
+    // mkfs.ext4'd volume always has a lost+found dir at its root — so Postgres's data
+    // dir has to be a subdirectory of the mount point, not the mount point itself.
+    "mkdir -p /data/automation-service-postgres/pgdata",
     "if ! command -v docker >/dev/null 2>&1; then",
     "  if command -v dnf >/dev/null 2>&1; then",
     "    dnf install -y docker",
@@ -200,7 +204,7 @@ locals {
     "systemctl enable --now docker",
     "POSTGRES_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.postgres_password.name} --with-decryption --query Parameter.Value --output text)",
     "docker rm -f automation-service-postgres >/dev/null 2>&1 || true",
-    "docker run -d --name automation-service-postgres --restart unless-stopped --network host -v /data/automation-service-postgres:/var/lib/postgresql/data -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=\"$POSTGRES_PASSWORD\" -e POSTGRES_DB=automation postgres:16-alpine",
+    "docker run -d --name automation-service-postgres --restart unless-stopped --network host -v /data/automation-service-postgres/pgdata:/var/lib/postgresql/data -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=\"$POSTGRES_PASSWORD\" -e POSTGRES_DB=automation postgres:16-alpine",
     "for _ in $(seq 1 30); do docker exec automation-service-postgres pg_isready -U postgres >/dev/null 2>&1 && break; sleep 5; done",
     "docker pull ${var.automation_service_image}",
     "docker rm -f automation-service >/dev/null 2>&1 || true",
