@@ -57,7 +57,12 @@ locals {
     "systemctl enable --now docker",
     "docker pull ${var.navigation_service_image}",
     "docker rm -f navigation-service >/dev/null 2>&1 || true",
-    "docker run -d --name navigation-service --restart unless-stopped -p ${var.navigation_service_port}:8080 -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} ${var.navigation_service_image}",
+    // --network host (not -p port:8080, unlike the pre-existing config): navigation-service calls
+    // st-gateway via ST_GATEWAY_URL, defaulting to http://localhost:3002 — under bridge networking
+    // that "localhost" is the container's own loopback, not the shared EC2 host where st-gateway
+    // actually listens, so every upstream SpaceTraders call connection-refused (meta bug, found
+    // while investigating prod's /api/v1/systems/*/waypoints 500s).
+    "docker run -d --name navigation-service --restart unless-stopped --network host -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} ${var.navigation_service_image}",
   ]
 }
 
