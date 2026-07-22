@@ -33,7 +33,7 @@ data "aws_iam_policy_document" "github_ssm_deploy_trust" {
     # plain form, even though this same pattern worked for agent-service (confirmed via
     # CloudTrail). Pinning both exact forms per service instead of wildcarding to keep the
     # trust boundary tight. Org ID 171620707; repo IDs: navigation-service 813281107,
-    # agent-service 810497500, fleet-service 1301535652.
+    # agent-service 810497500, fleet-service 1301535652, automation-service 1304148330.
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
@@ -44,6 +44,8 @@ data "aws_iam_policy_document" "github_ssm_deploy_trust" {
         "repo:V-M-Pioneer-Trading@171620707/agent-service@810497500:ref:refs/heads/main",
         "repo:V-M-Pioneer-Trading/fleet-service:ref:refs/heads/main",
         "repo:V-M-Pioneer-Trading@171620707/fleet-service@1301535652:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading/automation-service:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading@171620707/automation-service@1304148330:ref:refs/heads/main",
       ]
     }
   }
@@ -72,6 +74,7 @@ resource "aws_iam_role_policy" "github_ssm_deploy" {
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/navigation-service-bootstrap-*",
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/agent-service-bootstrap-*",
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/fleet-service-bootstrap-*",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/automation-service-bootstrap-*",
           "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*",
         ]
       },
@@ -83,3 +86,5 @@ resource "aws_iam_role_policy" "github_ssm_deploy" {
     ]
   })
 }
+
+# marker-test
