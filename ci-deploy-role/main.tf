@@ -46,6 +46,8 @@ data "aws_iam_policy_document" "github_ssm_deploy_trust" {
         "repo:V-M-Pioneer-Trading@171620707/fleet-service@1301535652:ref:refs/heads/main",
         "repo:V-M-Pioneer-Trading/automation-service:ref:refs/heads/main",
         "repo:V-M-Pioneer-Trading@171620707/automation-service@1304148330:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading/st-gateway:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading@171620707/st-gateway@1304093584:ref:refs/heads/main",
       ]
     }
   }
