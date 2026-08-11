@@ -20,6 +20,7 @@ jobs:
         stack:
           - agent-service
           - automation-service
+          - caddy
           - ci-deploy-role
           - fleet-service
           - navigation-service

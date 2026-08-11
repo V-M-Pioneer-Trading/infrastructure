@@ -1,0 +1,51 @@
+{
+	admin off
+	email ${acme_email}
+}
+
+# The public backend origin. CloudFront is the only thing the security group lets
+# reach this host, and it connects here over HTTPS on 443. The certificate is
+# issued by Let's Encrypt via the ACME DNS-01 challenge (Route53) — HTTP-01 is
+# impossible because port 80 is not open to Let's Encrypt's validators.
+#
+# {$CADDY_DOMAIN} and {$ORIGIN_VERIFY_SECRET} are Caddy env-var placeholders,
+# resolved from the container's environment at start — the secret is never baked
+# into this file. The port values are injected by Terraform's templatefile.
+{$CADDY_DOMAIN} {
+	tls {
+		dns route53
+		resolvers 1.1.1.1
+	}
+
+	# Origin authentication: the prefix list only proves a request came from
+	# *some* CloudFront distribution, not ours. Every request must carry the
+	# shared secret in X-Origin-Verify (injected by our distribution as an origin
+	# custom header). Anything else — including a stranger pointing their own
+	# distribution at this host — gets 403 before reaching a backend.
+	@unverified not header X-Origin-Verify {$ORIGIN_VERIFY_SECRET}
+	respond @unverified "Forbidden" 403
+
+	# Path prefixes match the CloudFront cache-behavior patterns exactly. handle
+	# (not handle_path) preserves the full path, because each service self-mounts
+	# under its own /api/<service>/... prefix.
+	handle /api/navigation/* {
+		reverse_proxy localhost:${navigation_port}
+	}
+	handle /api/agent/* {
+		reverse_proxy localhost:${agent_port}
+	}
+	handle /api/fleet/* {
+		reverse_proxy localhost:${fleet_port}
+	}
+	handle /api/automation/* {
+		reverse_proxy localhost:${automation_port}
+	}
+	# st-gateway is internal-only; only its unauthenticated health probe is routed.
+	handle /api/st-gateway/health {
+		reverse_proxy localhost:${gateway_port}
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}
