@@ -1,6 +1,11 @@
 {
 	admin off
 	email ${acme_email}
+	# Don't open the :80 HTTP->HTTPS redirect listener: agent-service already binds
+	# port 80 on this host (they share host networking), so the redirect server
+	# would collide and crash-loop Caddy. CloudFront always connects over HTTPS and
+	# the cert uses the DNS-01 challenge, so port 80 is never needed here.
+	auto_https disable_redirects
 }
 
 # The public backend origin. CloudFront is the only thing the security group lets
