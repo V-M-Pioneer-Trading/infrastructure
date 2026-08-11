@@ -185,10 +185,13 @@ locals {
     "MYSQL_ROOT_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_root_password.name} --with-decryption --query Parameter.Value --output text)",
     "MYSQL_APP_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_app_password.name} --with-decryption --query Parameter.Value --output text)",
     "docker rm -f agent-service-mysql >/dev/null 2>&1 || true",
-    # Pinned to a major.minor tag, not :latest — an unpinned tag would silently
-    # pull the next MySQL major on the next host rebuild, risking an incompatible
-    # on-disk data format against the retained EBS volume.
-    "docker run -d --name agent-service-mysql --restart unless-stopped --network host -v /data/agent-service-mysql:/var/lib/mysql -e MYSQL_ROOT_PASSWORD=\"$MYSQL_ROOT_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" mysql:8.4",
+    # Pinned to the current major (9) rather than :latest — an unpinned tag would
+    # silently pull the next MySQL major on the next host rebuild, risking an
+    # incompatible on-disk data format against the retained EBS volume. Pinned to
+    # the running major, not below it: MySQL refuses to start on a data dir from a
+    # newer major, so a downgrade (e.g. to 8.4) would break the DB on redeploy.
+    # The `mysql:9` tag tracks the latest 9.x; in-place minor upgrades are safe.
+    "docker run -d --name agent-service-mysql --restart unless-stopped --network host -v /data/agent-service-mysql:/var/lib/mysql -e MYSQL_ROOT_PASSWORD=\"$MYSQL_ROOT_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" mysql:9",
     "for _ in $(seq 1 30); do docker exec agent-service-mysql mysqladmin ping -h localhost -u root -p\"$MYSQL_ROOT_PASSWORD\" >/dev/null 2>&1 && break; sleep 5; done",
     "docker pull ${var.gateway_image}",
     "docker rm -f st-gateway >/dev/null 2>&1 || true",
