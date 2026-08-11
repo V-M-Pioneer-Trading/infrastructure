@@ -70,16 +70,17 @@ data "aws_ec2_managed_prefix_list" "cloudfront" {
   name = "com.amazonaws.global.cloudfront.origin-facing"
 }
 
-// Covers navigation-service (8080), agent-service (80), and fleet-service (3001) in one rule.
-// AWS's "rules per security group" quota counts a prefix-list-referencing rule by that list's
-// entry count (45 for CloudFront's), not as a flat 1 — a separate rule per service exceeded the
-// default 60-rule quota, so all three backend ports share this single rule instead.
+// Only 443 is exposed now: the on-host Caddy edge proxy is the single service
+// CloudFront reaches, terminating TLS and routing to the backend containers over
+// localhost. The old 80-8080 span (one rule for navigation/agent/fleet/automation
+// /st-gateway ports) is gone — those ports are no longer reachable from off-host.
+// Source stays the CloudFront origin-facing prefix list.
 resource "aws_vpc_security_group_ingress_rule" "shared_backend_ports_from_cloudfront" {
-  description       = "Allow navigation/agent/fleet-service traffic from CloudFront only."
+  description       = "Allow HTTPS from CloudFront to the Caddy edge proxy only."
   security_group_id = data.terraform_remote_state.personal.outputs.ec2_security_group_id
   prefix_list_id    = data.aws_ec2_managed_prefix_list.cloudfront.id
-  from_port         = 80
-  to_port           = 8080
+  from_port         = 443
+  to_port           = 443
   ip_protocol       = "tcp"
 }
 
