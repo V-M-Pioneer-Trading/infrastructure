@@ -4,6 +4,18 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
+# The shared EC2 host's instance ID, so SendCommand can be scoped to that one
+# instance instead of every instance in the account.
+data "terraform_remote_state" "personal" {
+  backend = "s3"
+
+  config = {
+    bucket = "radomskyi-tfstate"
+    key    = "personal/terraform.tfstate"
+    region = var.aws_region
+  }
+}
+
 # Looks up the OIDC provider created once in mradomsky/infrastructure's bootstrap
 # stack (AWS allows only one token.actions.githubusercontent.com provider per
 # account) rather than depending on that stack's state.
@@ -77,7 +89,9 @@ resource "aws_iam_role_policy" "github_ssm_deploy" {
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/agent-service-bootstrap-*",
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/fleet-service-bootstrap-*",
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/automation-service-bootstrap-*",
-          "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*",
+          # Scoped to the single shared EC2 host, not instance/* — a compromised
+          # service CI can only target the one instance the bootstrap docs run on.
+          "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/${data.terraform_remote_state.personal.outputs.ec2_instance_id}",
         ]
       },
       {
@@ -88,5 +102,3 @@ resource "aws_iam_role_policy" "github_ssm_deploy" {
     ]
   })
 }
-
-# marker-test
