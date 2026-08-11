@@ -28,29 +28,37 @@
 	# custom header). Anything else — including a stranger pointing their own
 	# distribution at this host — gets 403 before reaching a backend.
 	@unverified not header X-Origin-Verify {$ORIGIN_VERIFY_SECRET}
-	respond @unverified "Forbidden" 403
 
-	# Path prefixes match the CloudFront cache-behavior patterns exactly. handle
-	# (not handle_path) preserves the full path, because each service self-mounts
-	# under its own /api/<service>/... prefix.
-	handle /api/navigation/* {
-		reverse_proxy localhost:${navigation_port}
-	}
-	handle /api/agent/* {
-		reverse_proxy localhost:${agent_port}
-	}
-	handle /api/fleet/* {
-		reverse_proxy localhost:${fleet_port}
-	}
-	handle /api/automation/* {
-		reverse_proxy localhost:${automation_port}
-	}
-	# st-gateway is internal-only; only its unauthenticated health probe is routed.
-	handle /api/st-gateway/health {
-		reverse_proxy localhost:${gateway_port}
-	}
+	# Wrapped in `route` so directives execute in written order: the 403 guard must
+	# run BEFORE the handle blocks. Without route, a `handle` (which is terminal)
+	# matches and serves the request first under Caddy's default directive order,
+	# and the guard never fires — origin auth fails open. Verified by an
+	# unauthenticated request returning 200 instead of 403.
+	route {
+		respond @unverified "Forbidden" 403
 
-	handle {
-		respond "Not Found" 404
+		# Path prefixes match the CloudFront cache-behavior patterns exactly.
+		# handle (not handle_path) preserves the full path, because each service
+		# self-mounts under its own /api/<service>/... prefix.
+		handle /api/navigation/* {
+			reverse_proxy localhost:${navigation_port}
+		}
+		handle /api/agent/* {
+			reverse_proxy localhost:${agent_port}
+		}
+		handle /api/fleet/* {
+			reverse_proxy localhost:${fleet_port}
+		}
+		handle /api/automation/* {
+			reverse_proxy localhost:${automation_port}
+		}
+		# st-gateway is internal-only; only its unauthenticated health probe is routed.
+		handle /api/st-gateway/health {
+			reverse_proxy localhost:${gateway_port}
+		}
+
+		handle {
+			respond "Not Found" 404
+		}
 	}
 }
