@@ -5,19 +5,43 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per Terraform stack. The repo root has no .tf files, so a
+        # single root-level `validate` was a no-op — each stack must be checked
+        # in its own directory.
+        stack:
+          - agent-service
+          - automation-service
+          - ci-deploy-role
+          - fleet-service
+          - navigation-service
+    defaults:
+      run:
+        working-directory: ${{ matrix.stack }}
     steps:
-      - uses: actions/checkout@v4
+      # Actions pinned to commit SHAs, not tags: tags are mutable and this repo
+      # is public. Dependabot (.github/dependabot.yml) keeps the pins current.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: "1.13.0"
 
+      # fmt runs recursively once from the root; harmless to repeat per stack and
+      # keeps each matrix job self-contained.
       - name: terraform fmt
         run: terraform fmt -check -recursive
 
+      # -backend=false: CI holds no AWS credentials, so it never touches the S3
+      # backend. This validates configuration only.
       - name: terraform init
         run: terraform init -backend=false -input=false
 
