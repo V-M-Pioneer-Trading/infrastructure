@@ -59,3 +59,14 @@ variable "clerk_issuer" {
   type        = string
   default     = "https://uncommon-crayfish-6401.clerk.accounts.dev"
 }
+
+# No default: a real Clerk Machine's Secret Key (auth-design.md decision
+# 19), which only Clerk mints — this is a genuine bearer credential, unlike
+# clerk_jwt_key above (a public key). Lets automation-service mint its own
+# M2M token to call agent/fleet-service, since it has no human Clerk session
+# to present the way command-interface does.
+variable "clerk_m2m_secret_key" {
+  description = "Secret Key for the Clerk Machine representing automation-service, used to mint its outbound M2M token."
+  type        = string
+  sensitive   = true
+}
