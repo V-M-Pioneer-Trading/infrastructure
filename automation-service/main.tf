@@ -78,6 +78,16 @@ resource "aws_ssm_parameter" "clerk_jwt_key" {
   value = var.clerk_jwt_key
 }
 
+# auth-design.md decision 19: this service is itself a caller of agent/fleet
+# -service, so it also needs a credential to *sign* an outbound Authorization
+# with — a dedicated Clerk Machine's Secret Key, not the verification key
+# above. No default (see variables.tf) — Clerk mints this, not Terraform.
+resource "aws_ssm_parameter" "clerk_m2m_secret_key" {
+  name  = "automation-service-clerk-m2m-secret-key"
+  type  = "SecureString"
+  value = var.clerk_m2m_secret_key
+}
+
 # Lets the shared host's bootstrap script read this SecureString parameter at
 # container-start time, mirroring agent-service's MySQL password pattern.
 resource "aws_iam_role_policy" "shared_ec2_automation_service_ssm_parameters" {
@@ -94,6 +104,7 @@ resource "aws_iam_role_policy" "shared_ec2_automation_service_ssm_parameters" {
           aws_ssm_parameter.postgres_password.arn,
           aws_ssm_parameter.ai_service_secret.arn,
           aws_ssm_parameter.clerk_jwt_key.arn,
+          aws_ssm_parameter.clerk_m2m_secret_key.arn,
         ]
       },
       {
@@ -229,12 +240,13 @@ locals {
     "POSTGRES_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.postgres_password.name} --with-decryption --query Parameter.Value --output text)",
     "AI_SERVICE_SECRET=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.ai_service_secret.name} --with-decryption --query Parameter.Value --output text)",
     "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
+    "CLERK_M2M_SECRET_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_m2m_secret_key.name} --with-decryption --query Parameter.Value --output text)",
     "docker rm -f automation-service-postgres >/dev/null 2>&1 || true",
     "docker run -d --name automation-service-postgres --restart unless-stopped --network host -v /data/automation-service-postgres/pgdata:/var/lib/postgresql/data -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=\"$POSTGRES_PASSWORD\" -e POSTGRES_DB=automation postgres:16-alpine",
     "for _ in $(seq 1 30); do docker exec automation-service-postgres pg_isready -U postgres >/dev/null 2>&1 && break; sleep 5; done",
     "docker pull ${var.automation_service_image}",
     "docker rm -f automation-service >/dev/null 2>&1 || true",
-    "docker run -d --name automation-service --restart unless-stopped --network host -e PORT=${var.automation_service_port} -e DATABASE_URL=\"postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/automation\" -e NAVIGATION_SERVICE_URL=http://localhost:${data.terraform_remote_state.navigation_service.outputs.navigation_service_port}/api/navigation/v1 -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e FLEET_SERVICE_URL=http://localhost:${data.terraform_remote_state.fleet_service.outputs.fleet_service_port}/api/fleet/v1 -e MINING_SHIP_SYMBOL=${var.mining_ship_symbol} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AI_SERVICE_SECRET=\"$AI_SERVICE_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.automation_service_image}",
+    "docker run -d --name automation-service --restart unless-stopped --network host -e PORT=${var.automation_service_port} -e DATABASE_URL=\"postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/automation\" -e NAVIGATION_SERVICE_URL=http://localhost:${data.terraform_remote_state.navigation_service.outputs.navigation_service_port}/api/navigation/v1 -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e FLEET_SERVICE_URL=http://localhost:${data.terraform_remote_state.fleet_service.outputs.fleet_service_port}/api/fleet/v1 -e MINING_SHIP_SYMBOL=${var.mining_ship_symbol} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AI_SERVICE_SECRET=\"$AI_SERVICE_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e CLERK_M2M_SECRET_KEY=\"$CLERK_M2M_SECRET_KEY\" ${var.automation_service_image}",
   ]
 }
 
