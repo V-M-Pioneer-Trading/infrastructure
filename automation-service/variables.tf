@@ -44,3 +44,18 @@ variable "mining_ship_symbol" {
   description = "SpaceTraders ship symbol automation-service's mining autopilot drives."
   type        = string
 }
+
+# No default: this is the spacetraders Clerk instance's RS256 public key
+# (PEM/SPKI), fetched from its JWKS endpoint — not a secret, but nothing
+# guesses it, so it must be supplied explicitly at apply time.
+variable "clerk_jwt_key" {
+  description = "Clerk RS256 public key (PEM/SPKI) automation-service uses to verify session JWTs."
+  type        = string
+  sensitive   = true
+}
+
+variable "clerk_issuer" {
+  description = "Expected `iss` claim on Clerk session JWTs — narrows misconfiguration, verification itself relies on the key above."
+  type        = string
+  default     = "https://uncommon-crayfish-6401.clerk.accounts.dev"
+}

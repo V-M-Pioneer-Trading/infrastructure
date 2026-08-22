@@ -43,6 +43,12 @@ resource "aws_ssm_parameter" "mysql_app_password" {
   value = random_password.mysql_app.result
 }
 
+resource "aws_ssm_parameter" "clerk_jwt_key" {
+  name  = "agent-service-clerk-jwt-key"
+  type  = "SecureString"
+  value = var.clerk_jwt_key
+}
+
 # Lets the shared host's bootstrap script read these SecureString parameters at
 # container-start time, mirroring how navigation-service's GHCR PAT used to work.
 resource "aws_iam_role_policy" "shared_ec2_agent_service_ssm_parameters" {
@@ -58,6 +64,7 @@ resource "aws_iam_role_policy" "shared_ec2_agent_service_ssm_parameters" {
         Resource = [
           aws_ssm_parameter.mysql_root_password.arn,
           aws_ssm_parameter.mysql_app_password.arn,
+          aws_ssm_parameter.clerk_jwt_key.arn,
         ]
       },
       {
@@ -184,6 +191,7 @@ locals {
     "systemctl enable --now docker",
     "MYSQL_ROOT_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_root_password.name} --with-decryption --query Parameter.Value --output text)",
     "MYSQL_APP_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_app_password.name} --with-decryption --query Parameter.Value --output text)",
+    "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
     "docker rm -f agent-service-mysql >/dev/null 2>&1 || true",
     # Pinned to the current major (9) rather than :latest — an unpinned tag would
     # silently pull the next MySQL major on the next host rebuild, risking an
@@ -198,7 +206,7 @@ locals {
     "docker run -d --name st-gateway --restart unless-stopped --network host -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 ${var.gateway_image}",
     "docker pull ${var.agent_service_image}",
     "docker rm -f agent-service >/dev/null 2>&1 || true",
-    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} ${var.agent_service_image}",
+    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.agent_service_image}",
   ]
 }
 
