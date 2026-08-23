@@ -45,7 +45,8 @@ data "aws_iam_policy_document" "github_ssm_deploy_trust" {
     # plain form, even though this same pattern worked for agent-service (confirmed via
     # CloudTrail). Pinning both exact forms per service instead of wildcarding to keep the
     # trust boundary tight. Org ID 171620707; repo IDs: navigation-service 813281107,
-    # agent-service 810497500, fleet-service 1301535652, automation-service 1304148330.
+    # agent-service 810497500, fleet-service 1301535652, automation-service 1304148330,
+    # st-gateway 1304093584, auth-service 1343228906.
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
@@ -60,6 +61,8 @@ data "aws_iam_policy_document" "github_ssm_deploy_trust" {
         "repo:V-M-Pioneer-Trading@171620707/automation-service@1304148330:ref:refs/heads/main",
         "repo:V-M-Pioneer-Trading/st-gateway:ref:refs/heads/main",
         "repo:V-M-Pioneer-Trading@171620707/st-gateway@1304093584:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading/auth-service:ref:refs/heads/main",
+        "repo:V-M-Pioneer-Trading@171620707/auth-service@1343228906:ref:refs/heads/main",
       ]
     }
   }
@@ -89,6 +92,7 @@ resource "aws_iam_role_policy" "github_ssm_deploy" {
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/agent-service-bootstrap-*",
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/fleet-service-bootstrap-*",
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/automation-service-bootstrap-*",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:document/auth-service-bootstrap-*",
           # Scoped to the single shared EC2 host, not instance/* — a compromised
           # service CI can only target the one instance the bootstrap docs run on.
           "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/${data.terraform_remote_state.personal.outputs.ec2_instance_id}",
