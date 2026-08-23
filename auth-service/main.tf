@@ -217,49 +217,59 @@ locals {
     # three carry this exact line — see the locals block above.
     "docker network inspect authnet >/dev/null 2>&1 || docker network create --subnet ${local.authnet_subnet} authnet",
     # decision 9: a bridge alone doesn't isolate authnet from --network host
-    # containers. Two separate rules, verified live against the real host
-    # (2026-08-23) rather than trusted from documentation alone, because each
-    # one covers a traffic pattern the other misses:
+    # containers, so auth-service's IP is guarded explicitly in two chains.
+    # Everything below was verified live against the real host (2026-08-23).
+    # An earlier subnet-wide version of these rules caused a production
+    # outage; the reasoning for the current shape is recorded here so it
+    # doesn't get "simplified" back into one.
     #
-    # 1. DOCKER-USER (FORWARD chain) governs traffic between authnet and
-    #    everything the bridge routes to — this is where OTHER containers'
-    #    traffic into authnet gets filtered. It must NOT block authnet's own
-    #    internal traffic (st-gateway <-> auth-service <-> Caddy): this host
-    #    has br_netfilter enabled (Docker requires it for NAT/port-publishing
-    #    to work at all), so even same-bridge container-to-container traffic
-    #    transits DOCKER-USER — a blanket "drop everything into authnet" rule
-    #    was found live to also drop legitimate authnet-internal traffic, not
-    #    just the intended host-network traffic. Fixed with a source
-    #    exception: anything already sourced from authnet is waved through
-    #    before the drop. The second exception is st-gateway's own published
-    #    port (127.0.0.1:${local.st_gateway_port}, agent-service/main.tf),
-    #    DNAT'd to its fixed bridge IP *before* DOCKER-USER evaluates the
-    #    packet, so that specific destination must be allowed explicitly.
+    # SCOPE: both jumps match auth-service's IP alone, NOT the whole
+    # ${local.authnet_subnet}. Subnet-wide is the intuitive way to write this
+    # and it is wrong — the subnet also holds st-gateway's DNAT'd published
+    # port and Caddy's public :443, so a subnet-wide guard drops CloudFront's
+    # inbound HTTPS to Caddy (100% of public ingress) along with replies bound
+    # for any authnet member. auth-service is the only thing that must be
+    # unreachable from off-bridge; guard exactly that and nothing else.
     #
-    # 2. OUTPUT (host's own locally-generated traffic) is the piece DOCKER-USER
-    #    cannot cover at all: a host process (or, equivalently, a --network
-    #    host container) directly addressing a bridge container's IP was
-    #    verified live to never transit FORWARD/DOCKER-USER on this kernel —
-    #    it's delivered without ever hitting the forwarding path DOCKER-USER
-    #    hooks into. Only an OUTPUT-chain rule, which sees every locally
-    #    generated packet regardless of destination, actually blocks this.
+    # 1. DOCKER-USER (FORWARD) — filters what the bridge routes toward
+    #    auth-service. br_netfilter is enabled here (Docker needs it for
+    #    NAT/port publishing), so even same-bridge container-to-container
+    #    traffic transits DOCKER-USER; the -s ${local.authnet_subnet}
+    #    exception is what keeps st-gateway/Caddy -> auth-service working.
+    #    The conntrack exception is required for auth-service's own outbound
+    #    replies: without it, DNS answers and SpaceTraders API responses
+    #    coming back to the bridge are dropped. That exact bug silently broke
+    #    st-gateway's DNS resolution — nothing could reach the real game API —
+    #    while every /health check kept returning 200, so it went unnoticed.
+    #
+    # 2. OUTPUT — the piece DOCKER-USER cannot cover: a host process (or,
+    #    equivalently, a --network host container; all four share the host's
+    #    netns, verified by comparing /proc/<pid>/ns/net) addressing a bridge
+    #    IP directly never transits FORWARD/DOCKER-USER on this kernel. Only
+    #    OUTPUT sees it. Its conntrack exception is equally load-bearing:
+    #    replies from host-network services back to an authnet container are
+    #    locally-generated packets, and dropping them breaks Caddy ->
+    #    navigation/agent/fleet/automation completely.
     #    Chain name capped at 28 chars — iptables' own limit, hit once
     #    (auth-service-authnet-output-guard, 34 chars, rejected outright).
     #
     # Both custom chains are flushed and rebuilt every run, keeping this
-    # idempotent without stacking duplicate DOCKER-USER/OUTPUT jump entries
-    # across repeated bootstraps.
+    # idempotent without stacking duplicate jump entries. The two -D lines
+    # strip the legacy subnet-wide jumps from hosts bootstrapped before the
+    # rescope; they no-op once those are gone.
+    "iptables -D DOCKER-USER -d ${local.authnet_subnet} -j auth-service-authnet-guard 2>/dev/null || true",
+    "iptables -D OUTPUT -d ${local.authnet_subnet} -j authnet-out-guard 2>/dev/null || true",
     "iptables -N auth-service-authnet-guard 2>/dev/null || true",
     "iptables -F auth-service-authnet-guard",
+    "iptables -A auth-service-authnet-guard -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN",
     "iptables -A auth-service-authnet-guard -s ${local.authnet_subnet} -j RETURN",
-    "iptables -A auth-service-authnet-guard -d ${local.authnet_st_gateway_ip}/32 -p tcp --dport ${local.st_gateway_port} -j RETURN",
     "iptables -A auth-service-authnet-guard -j DROP",
-    "iptables -C DOCKER-USER -d ${local.authnet_subnet} -j auth-service-authnet-guard 2>/dev/null || iptables -I DOCKER-USER -d ${local.authnet_subnet} -j auth-service-authnet-guard",
+    "iptables -C DOCKER-USER -d ${local.authnet_auth_service_ip}/32 -j auth-service-authnet-guard 2>/dev/null || iptables -I DOCKER-USER -d ${local.authnet_auth_service_ip}/32 -j auth-service-authnet-guard",
     "iptables -N authnet-out-guard 2>/dev/null || true",
     "iptables -F authnet-out-guard",
-    "iptables -A authnet-out-guard -d ${local.authnet_st_gateway_ip}/32 -p tcp --dport ${local.st_gateway_port} -j RETURN",
+    "iptables -A authnet-out-guard -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN",
     "iptables -A authnet-out-guard -j DROP",
-    "iptables -C OUTPUT -d ${local.authnet_subnet} -j authnet-out-guard 2>/dev/null || iptables -I OUTPUT -d ${local.authnet_subnet} -j authnet-out-guard",
+    "iptables -C OUTPUT -d ${local.authnet_auth_service_ip}/32 -j authnet-out-guard 2>/dev/null || iptables -I OUTPUT -d ${local.authnet_auth_service_ip}/32 -j authnet-out-guard",
     "AUTH_SERVICE_SHARED_SECRET=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.auth_service_shared_secret.name} --with-decryption --query Parameter.Value --output text)",
     "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
     "docker pull ${var.auth_service_image}",
