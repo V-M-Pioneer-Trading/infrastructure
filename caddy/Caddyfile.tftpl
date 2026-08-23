@@ -80,6 +80,13 @@
 		handle /api/auth/v1/register {
 			reverse_proxy auth-service:${auth_port}
 		}
+		# Liveness only, same public /api/<service>/health convention as the
+		# four services above — no token, no state, nothing gated. Needed
+		# explicitly because the routes above are exact paths rather than an
+		# /api/auth/* prefix, and a prefix here would expose /api/auth/v1/token.
+		handle /api/auth/health {
+			reverse_proxy auth-service:${auth_port}
+		}
 
 		handle {
 			respond "Not Found" 404
