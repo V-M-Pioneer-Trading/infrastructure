@@ -217,21 +217,49 @@ locals {
     # three carry this exact line — see the locals block above.
     "docker network inspect authnet >/dev/null 2>&1 || docker network create --subnet ${local.authnet_subnet} authnet",
     # decision 9: a bridge alone doesn't isolate authnet from --network host
-    # containers — they share the host's own network stack and can still
-    # reach the bridge subnet directly by IP, including via the exact DNAT
-    # path a published port uses internally. So this can't be a blanket
-    # "drop everything into authnet" rule: st-gateway's own published port
-    # (127.0.0.1:${local.st_gateway_port}, agent-service/main.tf) is DNAT'd
-    # to st-gateway's fixed bridge IP *before* DOCKER-USER evaluates the
-    # packet, so that specific destination must be allowed while everything
-    # else into the subnet is dropped. A custom chain, flushed and rebuilt
-    # every run, keeps this idempotent without stacking duplicate DOCKER-USER
-    # entries across repeated bootstraps.
+    # containers. Two separate rules, verified live against the real host
+    # (2026-08-23) rather than trusted from documentation alone, because each
+    # one covers a traffic pattern the other misses:
+    #
+    # 1. DOCKER-USER (FORWARD chain) governs traffic between authnet and
+    #    everything the bridge routes to — this is where OTHER containers'
+    #    traffic into authnet gets filtered. It must NOT block authnet's own
+    #    internal traffic (st-gateway <-> auth-service <-> Caddy): this host
+    #    has br_netfilter enabled (Docker requires it for NAT/port-publishing
+    #    to work at all), so even same-bridge container-to-container traffic
+    #    transits DOCKER-USER — a blanket "drop everything into authnet" rule
+    #    was found live to also drop legitimate authnet-internal traffic, not
+    #    just the intended host-network traffic. Fixed with a source
+    #    exception: anything already sourced from authnet is waved through
+    #    before the drop. The second exception is st-gateway's own published
+    #    port (127.0.0.1:${local.st_gateway_port}, agent-service/main.tf),
+    #    DNAT'd to its fixed bridge IP *before* DOCKER-USER evaluates the
+    #    packet, so that specific destination must be allowed explicitly.
+    #
+    # 2. OUTPUT (host's own locally-generated traffic) is the piece DOCKER-USER
+    #    cannot cover at all: a host process (or, equivalently, a --network
+    #    host container) directly addressing a bridge container's IP was
+    #    verified live to never transit FORWARD/DOCKER-USER on this kernel —
+    #    it's delivered without ever hitting the forwarding path DOCKER-USER
+    #    hooks into. Only an OUTPUT-chain rule, which sees every locally
+    #    generated packet regardless of destination, actually blocks this.
+    #    Chain name capped at 28 chars — iptables' own limit, hit once
+    #    (auth-service-authnet-output-guard, 34 chars, rejected outright).
+    #
+    # Both custom chains are flushed and rebuilt every run, keeping this
+    # idempotent without stacking duplicate DOCKER-USER/OUTPUT jump entries
+    # across repeated bootstraps.
     "iptables -N auth-service-authnet-guard 2>/dev/null || true",
     "iptables -F auth-service-authnet-guard",
+    "iptables -A auth-service-authnet-guard -s ${local.authnet_subnet} -j RETURN",
     "iptables -A auth-service-authnet-guard -d ${local.authnet_st_gateway_ip}/32 -p tcp --dport ${local.st_gateway_port} -j RETURN",
     "iptables -A auth-service-authnet-guard -j DROP",
     "iptables -C DOCKER-USER -d ${local.authnet_subnet} -j auth-service-authnet-guard 2>/dev/null || iptables -I DOCKER-USER -d ${local.authnet_subnet} -j auth-service-authnet-guard",
+    "iptables -N authnet-out-guard 2>/dev/null || true",
+    "iptables -F authnet-out-guard",
+    "iptables -A authnet-out-guard -d ${local.authnet_st_gateway_ip}/32 -p tcp --dport ${local.st_gateway_port} -j RETURN",
+    "iptables -A authnet-out-guard -j DROP",
+    "iptables -C OUTPUT -d ${local.authnet_subnet} -j authnet-out-guard 2>/dev/null || iptables -I OUTPUT -d ${local.authnet_subnet} -j authnet-out-guard",
     "AUTH_SERVICE_SHARED_SECRET=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.auth_service_shared_secret.name} --with-decryption --query Parameter.Value --output text)",
     "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
     "docker pull ${var.auth_service_image}",
