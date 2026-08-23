@@ -40,21 +40,45 @@
 		# Path prefixes match the CloudFront cache-behavior patterns exactly.
 		# handle (not handle_path) preserves the full path, because each service
 		# self-mounts under its own /api/<service>/... prefix.
+		#
+		# Two different backend-addressing schemes below, per increment 3 Stage
+		# 4 / auth-design.md decision 9: navigation/agent/fleet/automation stay
+		# on --network host, so Caddy (now on the authnet bridge) reaches them
+		# via the Docker host-gateway address, not localhost — localhost from
+		# inside a bridge-networked container means the container itself.
+		# auth-service is on authnet too, so it's reached by ordinary bridge DNS
+		# (its container name) instead.
 		handle /api/navigation/* {
-			reverse_proxy localhost:${navigation_port}
+			reverse_proxy host.docker.internal:${navigation_port}
 		}
 		handle /api/agent/* {
-			reverse_proxy localhost:${agent_port}
+			reverse_proxy host.docker.internal:${agent_port}
 		}
 		handle /api/fleet/* {
-			reverse_proxy localhost:${fleet_port}
+			reverse_proxy host.docker.internal:${fleet_port}
 		}
 		handle /api/automation/* {
-			reverse_proxy localhost:${automation_port}
+			reverse_proxy host.docker.internal:${automation_port}
 		}
-		# st-gateway is internal-only; only its unauthenticated health probe is routed.
+		# st-gateway is internal-only; only its unauthenticated health probe is
+		# routed. It's on authnet too (decision 9), so bridge DNS, not the
+		# host-gateway address used for the four services above.
 		handle /api/st-gateway/health {
-			reverse_proxy localhost:${gateway_port}
+			reverse_proxy st-gateway:${gateway_port}
+		}
+
+		# auth-service (decision 9): only these three paths, and specifically
+		# never /auth/v1/token at any method — that's the one route that can
+		# return a token, and it must stay authnet-internal, reachable only by
+		# st-gateway directly. Bridge DNS, same reasoning as st-gateway above.
+		handle /api/auth/v1/status {
+			reverse_proxy auth-service:${auth_port}
+		}
+		handle /api/auth/v1/agent-token {
+			reverse_proxy auth-service:${auth_port}
+		}
+		handle /api/auth/v1/register {
+			reverse_proxy auth-service:${auth_port}
 		}
 
 		handle {

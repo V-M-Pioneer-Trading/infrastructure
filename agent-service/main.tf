@@ -151,6 +151,13 @@ resource "aws_dlm_lifecycle_policy" "agent_service_mysql_data" {
 }
 
 locals {
+  # increment 3 Stage 4 / auth-design.md decision 9 — same fixed-IP plan as
+  # auth-service/main.tf and caddy/main.tf; see that comment for the full
+  # explanation of why this is a hand-coordinated literal across three
+  # independent Terraform stacks rather than a shared variable.
+  authnet_subnet     = "172.28.0.0/24"
+  authnet_gateway_ip = "172.28.0.10"
+
   agent_service_bootstrap_commands = [
     "set -euo pipefail",
     "cloud-init status --wait >/dev/null 2>&1 || true",
@@ -201,9 +208,19 @@ locals {
     # The `mysql:9` tag tracks the latest 9.x; in-place minor upgrades are safe.
     "docker run -d --name agent-service-mysql --restart unless-stopped --network host -v /data/agent-service-mysql:/var/lib/mysql -e MYSQL_ROOT_PASSWORD=\"$MYSQL_ROOT_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" mysql:9",
     "for _ in $(seq 1 30); do docker exec agent-service-mysql mysqladmin ping -h localhost -u root -p\"$MYSQL_ROOT_PASSWORD\" >/dev/null 2>&1 && break; sleep 5; done",
+    # Idempotent: see auth-service/main.tf's identical line — whichever of
+    # the three authnet stacks' bootstraps runs first actually creates it.
+    "docker network inspect authnet >/dev/null 2>&1 || docker network create --subnet ${local.authnet_subnet} authnet",
     "docker pull ${var.gateway_image}",
     "docker rm -f st-gateway >/dev/null 2>&1 || true",
-    "docker run -d --name st-gateway --restart unless-stopped --network host -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 ${var.gateway_image}",
+    # authnet, not host — decision 9. Still publishes on 127.0.0.1 so
+    # agent-service, navigation-service, fleet-service and automation-service
+    # (all staying on --network host) keep reaching it at the exact same
+    # http://localhost:${var.gateway_port} they already use — no changes
+    # needed in any of those four services. auth-service and Caddy, both also
+    # on authnet, reach it via bridge DNS (http://st-gateway:${var.gateway_port})
+    # instead.
+    "docker run -d --name st-gateway --restart unless-stopped --network authnet --ip ${local.authnet_gateway_ip} -p 127.0.0.1:${var.gateway_port}:${var.gateway_port} -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 ${var.gateway_image}",
     "docker pull ${var.agent_service_image}",
     "docker rm -f agent-service >/dev/null 2>&1 || true",
     "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.agent_service_image}",
