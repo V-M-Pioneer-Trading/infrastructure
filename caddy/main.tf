@@ -97,7 +97,7 @@ locals {
   # comment for the full explanation of why this is a hand-coordinated
   # literal across three independent Terraform stacks rather than a shared
   # variable.
-  authnet_subnet = "172.28.0.0/24"
+  authnet_subnet   = "172.28.0.0/24"
   authnet_caddy_ip = "172.28.0.12"
 
   # Built on the host at bootstrap (once, then cached): stock Caddy has no

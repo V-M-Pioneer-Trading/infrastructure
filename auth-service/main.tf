@@ -160,7 +160,7 @@ locals {
   # exact IP:port pair — Caddy and auth-service's own container-to-container
   # calls use ordinary Docker bridge DNS (service name) and never reference
   # these addresses directly.
-  authnet_subnet         = "172.28.0.0/24"
+  authnet_subnet          = "172.28.0.0/24"
   authnet_st_gateway_ip   = "172.28.0.10"
   authnet_auth_service_ip = "172.28.0.11"
   # 3002: st-gateway's fixed port everywhere in this codebase (not a
