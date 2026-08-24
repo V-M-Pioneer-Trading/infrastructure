@@ -16,6 +16,20 @@ data "aws_instance" "agent_service_host" {
   instance_id = var.ec2_instance_id
 }
 
+# st-gateway's container lives in this stack (see the note above the bootstrap
+# script), but the credential it presents to auth-service is owned by
+# auth-service's stack. Same cross-stack read caddy/main.tf already does for
+# the same reason — increment 3 Stage 5 / auth-design.md decision 5.
+data "terraform_remote_state" "auth_service" {
+  backend = "s3"
+
+  config = {
+    bucket = var.state_bucket
+    key    = "auth-service/terraform.tfstate"
+    region = var.aws_region
+  }
+}
+
 # KMS resource-based matching needs the key ARN, not the alias ARN.
 data "aws_kms_alias" "ssm" {
   name = "alias/aws/ssm"
@@ -199,6 +213,11 @@ locals {
     "MYSQL_ROOT_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_root_password.name} --with-decryption --query Parameter.Value --output text)",
     "MYSQL_APP_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_app_password.name} --with-decryption --query Parameter.Value --output text)",
     "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
+    # st-gateway's half of the auth-service shared secret (decision 5). The
+    # parameter belongs to auth-service's stack; the shared EC2 role is already
+    # granted GetParameter on it there, so no extra IAM is needed here — only
+    # the name, read from that stack's output.
+    "AUTH_SERVICE_SHARED_SECRET=$(aws ssm get-parameter --region ${var.aws_region} --name ${data.terraform_remote_state.auth_service.outputs.auth_service_shared_secret_parameter_name} --with-decryption --query Parameter.Value --output text)",
     "docker rm -f agent-service-mysql >/dev/null 2>&1 || true",
     # Pinned to the current major (9) rather than :latest — an unpinned tag would
     # silently pull the next MySQL major on the next host rebuild, risking an
@@ -220,7 +239,13 @@ locals {
     # needed in any of those four services. auth-service and Caddy, both also
     # on authnet, reach it via bridge DNS (http://st-gateway:${var.gateway_port})
     # instead.
-    "docker run -d --name st-gateway --restart unless-stopped --network authnet --ip ${local.authnet_gateway_ip} -p 127.0.0.1:${var.gateway_port}:${var.gateway_port} -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 ${var.gateway_image}",
+    # AUTH_SERVICE_SHARED_SECRET and CLERK_JWT_KEY are both required at
+    # startup by st-gateway's config.ts — it refuses to boot without them
+    # rather than running with authentication silently off, so these must be
+    # in place before the injecting image is deployed. auth-service is reached
+    # by bridge DNS: both containers are on authnet, and auth-service
+    # publishes no host port, so its container name is the only address.
+    "docker run -d --name st-gateway --restart unless-stopped --network authnet --ip ${local.authnet_gateway_ip} -p 127.0.0.1:${var.gateway_port}:${var.gateway_port} -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 -e AUTH_SERVICE_URL=http://auth-service:${data.terraform_remote_state.auth_service.outputs.auth_service_port} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.gateway_image}",
     "docker pull ${var.agent_service_image}",
     "docker rm -f agent-service >/dev/null 2>&1 || true",
     "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.agent_service_image}",
