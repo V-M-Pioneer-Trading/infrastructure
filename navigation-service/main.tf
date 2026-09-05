@@ -16,6 +16,42 @@ data "aws_instance" "navigation_service_host" {
   instance_id = var.ec2_instance_id
 }
 
+# KMS resource-based matching needs the key ARN, not the alias ARN.
+data "aws_kms_alias" "ssm" {
+  name = "alias/aws/ssm"
+}
+
+# navigation-service verifies Clerk session JWTs locally (auth-design.md decision
+# 10) and refuses to start without a trust anchor, so this parameter is
+# load-bearing: a host rebuild that cannot read it leaves the container
+# crash-looping, never running unauthenticated. Same pattern as fleet-service.
+resource "aws_ssm_parameter" "clerk_jwt_key" {
+  name  = "navigation-service-clerk-jwt-key"
+  type  = "SecureString"
+  value = var.clerk_jwt_key
+}
+
+resource "aws_iam_role_policy" "shared_ec2_navigation_service_ssm_parameters" {
+  name = "navigation-service-ssm-parameters"
+  role = data.terraform_remote_state.personal.outputs.ec2_role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = "ssm:GetParameter"
+        Resource = aws_ssm_parameter.clerk_jwt_key.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = "kms:Decrypt"
+        Resource = data.aws_kms_alias.ssm.target_key_arn
+      }
+    ]
+  })
+}
+
 locals {
   navigation_service_bootstrap_commands = [
     "set -euo pipefail",
@@ -55,6 +91,7 @@ locals {
     "  fi",
     "fi",
     "systemctl enable --now docker",
+    "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
     "docker pull ${var.navigation_service_image}",
     "docker rm -f navigation-service >/dev/null 2>&1 || true",
     // --network host (not -p port:8080, unlike the pre-existing config): navigation-service calls
@@ -62,7 +99,7 @@ locals {
     // that "localhost" is the container's own loopback, not the shared EC2 host where st-gateway
     // actually listens, so every upstream SpaceTraders call connection-refused (meta bug, found
     // while investigating prod's /api/v1/systems/*/waypoints 500s).
-    "docker run -d --name navigation-service --restart unless-stopped --network host -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} ${var.navigation_service_image}",
+    "docker run -d --name navigation-service --restart unless-stopped --network host -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.navigation_service_image}",
   ]
 }
 
