@@ -37,3 +37,15 @@ variable "cors_allowed_origin" {
   type        = string
   default     = "https://spacetraders.radomskyi.com"
 }
+
+variable "clerk_jwt_key" {
+  description = "Clerk RS256 public key (PEM/SPKI) navigation-service uses to verify session JWTs."
+  type        = string
+  sensitive   = true
+}
+
+variable "clerk_issuer" {
+  description = "Expected `iss` claim on Clerk session JWTs — narrows misconfiguration, verification itself relies on the key above."
+  type        = string
+  default     = "https://uncommon-crayfish-6401.clerk.accounts.dev"
+}
