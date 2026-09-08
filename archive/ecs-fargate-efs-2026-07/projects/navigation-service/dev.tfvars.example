@@ -1,0 +1,8 @@
+# dev defaults: public subnets, 1 replica, open ingress for quick testing
+environment      = "dev"
+container_image  = "123456789012.dkr.ecr.eu-central-1.amazonaws.com/navigation-service:latest"
+desired_count    = 1
+assign_public_ip = true
+
+ingress_cidr_blocks = ["0.0.0.0/0"]
+

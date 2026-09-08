@@ -1,0 +1,14 @@
+# prod defaults: private subnets, restricted ingress, stronger task size
+environment      = "prod"
+container_image  = "123456789012.dkr.ecr.eu-central-1.amazonaws.com/navigation-service:latest"
+cpu              = 1024
+memory           = 2048
+desired_count    = 1
+assign_public_ip = false
+
+ingress_cidr_blocks = ["10.0.0.0/8"]
+
+# Optional when not using default VPC:
+# vpc_id     = "vpc-xxxxxxxx"
+# subnet_ids = ["subnet-aaaa", "subnet-bbbb"]
+
