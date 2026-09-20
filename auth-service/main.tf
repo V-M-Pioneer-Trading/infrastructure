@@ -35,6 +35,26 @@ resource "aws_ssm_parameter" "auth_service_shared_secret" {
   value = random_password.auth_service_shared_secret.result
 }
 
+# meta#80 step 3 / decision 21. A SECOND, INDEPENDENT secret — deliberately a
+# separate random_password resource rather than a reuse of the one above, so
+# the two values can never coincide. This one is handed to every calling
+# service (fleet, automation, navigation, agent, st-gateway) in steps 4-9;
+# `auth_service_shared_secret` above is the vault key and stays with
+# st-gateway alone. Reusing the vault's secret here would hand four more
+# stacks the key to GET /auth/v1/token — see auth-design.md decision 9's
+# 2026-09-20 note, which is why this separation is load-bearing.
+# auth-service refuses to start if the two hold the same value.
+resource "random_password" "auth_introspection_secret" {
+  length  = 32
+  special = false
+}
+
+resource "aws_ssm_parameter" "auth_introspection_secret" {
+  name  = "auth-service-introspection-secret"
+  type  = "SecureString"
+  value = random_password.auth_introspection_secret.result
+}
+
 resource "aws_ssm_parameter" "clerk_jwt_key" {
   name  = "auth-service-clerk-jwt-key"
   type  = "SecureString"
@@ -55,6 +75,7 @@ resource "aws_iam_role_policy" "shared_ec2_auth_service_ssm_parameters" {
         Action = "ssm:GetParameter"
         Resource = [
           aws_ssm_parameter.auth_service_shared_secret.arn,
+          aws_ssm_parameter.auth_introspection_secret.arn,
           aws_ssm_parameter.clerk_jwt_key.arn,
         ]
       },
@@ -268,13 +289,169 @@ locals {
     "iptables -N authnet-out-guard 2>/dev/null || true",
     "iptables -F authnet-out-guard",
     "iptables -A authnet-out-guard -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN",
+    # meta#80 step 3 / decision 21: the ONE new rule. It lets a host process —
+    # and therefore any --network host container: fleet, automation,
+    # navigation, agent — open a NEW connection to auth-service's listener, so
+    # they can call POST /auth/v1/introspect. Everything else addressed to
+    # ${local.authnet_auth_service_ip} still falls through to the DROP below.
+    #
+    # It is a permitting rule inserted before the DROP, which is why it cannot
+    # reproduce the August/2026-08-23 outages: those came from an over-broad
+    # DROP, and a RETURN can only widen. auth-service-authnet-guard is NOT
+    # touched — st-gateway and Caddy reach auth-service over bridge DNS and
+    # that chain already returns for authnet sources.
+    #
+    # The accepted, temporary cost (auth-design.md decision 9's 2026-09-20
+    # note, owner's decision): this is a single process on a single port, so
+    # GET /auth/v1/token becomes network-reachable from those four services
+    # too. It stays guarded by AUTH_SERVICE_SHARED_SECRET, which no container
+    # but st-gateway and auth-service ever receives. That is what makes the
+    # SEPARATE introspection secret above load-bearing. The downgrade ends
+    # when the vault moves into st-gateway and the token route disappears.
+    "iptables -A authnet-out-guard -p tcp --dport ${var.auth_service_port} -j RETURN",
     "iptables -A authnet-out-guard -j DROP",
     "iptables -C OUTPUT -d ${local.authnet_auth_service_ip}/32 -j authnet-out-guard 2>/dev/null || iptables -I OUTPUT -d ${local.authnet_auth_service_ip}/32 -j authnet-out-guard",
-    "AUTH_SERVICE_SHARED_SECRET=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.auth_service_shared_secret.name} --with-decryption --query Parameter.Value --output text)",
-    "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
+    # ------------------------------------------------------------------
+    # Secret reads. EVERY read happens BEFORE `docker rm -f`, and a failed
+    # read aborts the script, so a running auth-service is left untouched
+    # rather than replaced by one holding an empty secret.
+    #
+    # Why the retry loop: `aws_iam_role_policy.shared_ec2_auth_service_ssm_parameters`
+    # gains this stack's new parameter ARN in the same apply that publishes
+    # the new document version, and IAM is eventually consistent. For a short
+    # window the instance role's cached policy can still deny the read. The
+    # AWS CLI prints nothing to stdout on AccessDenied (and `None` when a
+    # parameter resolves to nothing), so an unguarded `$(...)` yields an EMPTY
+    # string — and an auth-service started with an empty
+    # AUTH_INTROSPECTION_SECRET answers 401 to every caller, which looks
+    # exactly like a firewall problem. `depends_on` on the SSM document below
+    # orders the policy before the document version; this loop covers the
+    # propagation delay that ordering cannot.
+    "read_secure_parameter() {",
+    "  _param_name=\"$1\"",
+    "  _param_value=\"\"",
+    "  _attempt=0",
+    "  while [ \"$_attempt\" -lt 12 ]; do",
+    "    _attempt=$((_attempt + 1))",
+    "    _param_value=$(aws ssm get-parameter --region ${var.aws_region} --name \"$_param_name\" --with-decryption --query Parameter.Value --output text 2>/dev/null || true)",
+    "    if [ -n \"$_param_value\" ] && [ \"$_param_value\" != None ]; then",
+    "      printf '%s' \"$_param_value\"",
+    "      return 0",
+    "    fi",
+    "    echo \"waiting for SSM parameter $_param_name to read back non-empty (attempt $_attempt/12)\" >&2",
+    "    sleep 5",
+    "  done",
+    "  echo \"FATAL: SSM parameter $_param_name read back empty after ~60s. Most likely the instance role is not yet allowed to read it (IAM eventual consistency) or the parameter does not exist. Refusing to restart auth-service with an empty secret; the running container is untouched.\" >&2",
+    "  return 1",
+    "}",
+    "AUTH_SERVICE_SHARED_SECRET=$(read_secure_parameter ${aws_ssm_parameter.auth_service_shared_secret.name}) || exit 1",
+    "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${aws_ssm_parameter.auth_introspection_secret.name}) || exit 1",
+    "CLERK_JWT_KEY=$(read_secure_parameter ${aws_ssm_parameter.clerk_jwt_key.name}) || exit 1",
+    "[ -n \"$AUTH_SERVICE_SHARED_SECRET\" ] || { echo 'FATAL: AUTH_SERVICE_SHARED_SECRET is empty.' >&2; exit 1; }",
+    "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
+    "[ -n \"$CLERK_JWT_KEY\" ] || { echo 'FATAL: CLERK_JWT_KEY is empty.' >&2; exit 1; }",
+    "echo 'all three parameters read back non-empty.'",
+    # ------------------------------------------------------------------
+    # The loopback port must be free, or free because WE hold it. Checked
+    # BEFORE `docker rm -f`: from this apply onward the `docker run` below
+    # binds 127.0.0.1:${var.auth_service_port}, and a bind failure after the
+    # container has already been removed leaves the vault down. If anything
+    # other than the current auth-service container holds the port, stop here
+    # with auth-service still running.
+    "PORT_HELD=no",
+    "if ss -ltn 2>/dev/null | grep -qE \"127\\\\.0\\\\.0\\\\.1:${var.auth_service_port}[[:space:]]\"; then PORT_HELD=yes; fi",
+    "PORT_IS_OURS=no",
+    "if docker port auth-service 2>/dev/null | grep -qE \"127\\\\.0\\\\.0\\\\.1:${var.auth_service_port}\\$\"; then PORT_IS_OURS=yes; fi",
+    "if [ \"$PORT_HELD\" = yes ] && [ \"$PORT_IS_OURS\" = no ]; then",
+    "  echo 'FATAL: 127.0.0.1:${var.auth_service_port} is already held by something that is not the current auth-service container. Removing auth-service now would leave the vault down when docker run fails to bind. Listener follows; free the port and re-run the association.' >&2",
+    "  ss -ltnp 2>/dev/null | grep -w ${var.auth_service_port} >&2 || true",
+    "  exit 1",
+    "fi",
+    # ------------------------------------------------------------------
+    # Image digest before and after the pull. The tag is deliberately NOT
+    # pinned — `:latest` is how every stack on this host deploys — so the
+    # digests are echoed instead, and the SSM command output then says
+    # whether this run changed the image. The PR runbook's pre-apply step
+    # compares the running digest with the registry's `:latest` beforehand,
+    # so the change is known before the apply rather than after.
+    "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.auth_service_image} 2>/dev/null || true)",
+    "echo \"auth-service image digest before pull: $IMAGE_DIGEST_BEFORE\"",
     "docker pull ${var.auth_service_image}",
+    "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.auth_service_image} 2>/dev/null || true)",
+    "echo \"auth-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
+    "if [ \"$IMAGE_DIGEST_BEFORE\" != \"$IMAGE_DIGEST_AFTER\" ]; then",
+    "  echo 'NOTE: the pull changed the image; this run deploys a different build than the one that was running.'",
+    "else",
+    "  echo 'NOTE: the pull did not change the image.'",
+    "fi",
     "docker rm -f auth-service >/dev/null 2>&1 || true",
-    "docker run -d --name auth-service --restart unless-stopped --network authnet --ip ${local.authnet_auth_service_ip} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" ${var.auth_service_image}",
+    # -p 127.0.0.1:<port>:<port> (meta#80 step 3): loopback ONLY, exactly the
+    # form st-gateway already uses one stack over. The four --network host
+    # services then call http://localhost:${var.auth_service_port}/auth/v1/introspect,
+    # the same address shape they already use for st-gateway, with no
+    # knowledge of the bridge's IP plan. Chosen over handing them
+    # http://${local.authnet_auth_service_ip}:${var.auth_service_port} because
+    # the 127.0.0.1 bind keeps the listener off eth0 and every other external
+    # interface at the kernel level — the security group is then not the only
+    # thing standing between this port and the internet — and because it does
+    # not spread the hand-coordinated fixed-IP literal into four more stacks.
+    #
+    # Why filter OUTPUT still sees this traffic, whichever path Docker takes.
+    # Docker publishes a port in two ways and BOTH end up host-originated to
+    # ${local.authnet_auth_service_ip}, so the authnet-out-guard jump on
+    # OUTPUT — not the publish — is what makes the route reachable:
+    #   * DNAT path: the `nat OUTPUT` DOCKER rule rewrites the destination to
+    #     ${local.authnet_auth_service_ip}:${var.auth_service_port} before
+    #     `filter OUTPUT` runs, so filter OUTPUT matches the bridge IP.
+    #   * userland-proxy path: docker-proxy accepts on 127.0.0.1 and opens its
+    #     OWN connection to ${local.authnet_auth_service_ip}:${var.auth_service_port}
+    #     from the host netns — again a locally-generated packet through
+    #     filter OUTPUT.
+    # Either way it is FORWARD/DOCKER-USER that never sees it, which is the
+    # whole reason the OUTPUT chain exists. `docker port auth-service` plus
+    # `iptables -t nat -S DOCKER` say which path this host is on.
+    #
+    # Why this is not reachable from off-host: three independent reasons, and
+    # the publish alone is only the first.
+    #   1. The bind is 127.0.0.1, so the kernel never accepts a packet for
+    #      this port on eth0 — there is no DNAT from an external interface to
+    #      create in the first place.
+    #   2. If net.ipv4.conf.all.route_localnet were ever set to 1, a remote
+    #      packet addressed to 127.0.0.1 could be routed in; it would then
+    #      transit FORWARD -> DOCKER-USER -> auth-service-authnet-guard, whose
+    #      source is not ${local.authnet_subnet} and is therefore DROPped.
+    #   3. The instance security group allows 443 to Caddy only, and this PR
+    #      adds no ingress rule.
+    # The runbook checks `sysctl net.ipv4.conf.all.route_localnet` so reason 2
+    # is observed rather than assumed.
+    #
+    # The SQLite data volume mount is unchanged.
+    "docker run -d --name auth-service --restart unless-stopped --network authnet --ip ${local.authnet_auth_service_ip} -p 127.0.0.1:${var.auth_service_port}:${var.auth_service_port} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.auth_service_image}",
+    # `docker run -d` returning 0 only means the container was created. A bind
+    # failure on 127.0.0.1:${var.auth_service_port}, or a config the service
+    # refuses to start with, shows up as a container that is no longer
+    # running a moment later — and the vault is then DOWN. Short retry, then
+    # a non-zero exit so the SSM command is reported as Failed rather than
+    # Success. (`set -euo pipefail` is the first runCommand line, but this
+    # check is explicit so the failure has a readable message and does not
+    # depend on it.)
+    "AUTH_RUNNING=no",
+    "_attempt=0",
+    "while [ \"$_attempt\" -lt 10 ]; do",
+    "  _attempt=$((_attempt + 1))",
+    "  if [ \"$(docker inspect -f '{{.State.Running}}' auth-service 2>/dev/null || echo false)\" = true ]; then",
+    "    AUTH_RUNNING=yes",
+    "    break",
+    "  fi",
+    "  sleep 3",
+    "done",
+    "if [ \"$AUTH_RUNNING\" != yes ]; then",
+    "  echo 'FATAL: auth-service is not running ~30s after docker run. The credential vault and the introspection route are DOWN on this host. Container state and the last 50 log lines follow.' >&2",
+    "  docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' auth-service >&2 2>/dev/null || echo 'no such container' >&2",
+    "  docker logs --tail 50 auth-service >&2 2>&1 || true",
+    "  exit 1",
+    "fi",
+    "echo \"auth-service is running and bound to 127.0.0.1:${var.auth_service_port}.\"",
   ]
 }
 
@@ -296,6 +473,16 @@ resource "aws_ssm_document" "auth_service_bootstrap" {
       }
     ]
   })
+
+  # The bootstrap reads auth-service-introspection-secret with the shared EC2
+  # role. Without this edge Terraform is free to publish the new document
+  # version — which the association immediately re-runs — before the policy
+  # that grants GetParameter on the new ARN exists, and the read comes back
+  # empty: auth-service then starts with an empty AUTH_INTROSPECTION_SECRET
+  # and answers 401 to every caller, indistinguishable from a firewall
+  # problem. Ordering fixes the create-order race; the retry loop in the
+  # script covers IAM's eventual consistency, which ordering cannot.
+  depends_on = [aws_iam_role_policy.shared_ec2_auth_service_ssm_parameters]
 }
 
 resource "aws_ssm_association" "auth_service_bootstrap" {
@@ -306,5 +493,10 @@ resource "aws_ssm_association" "auth_service_bootstrap" {
     values = [var.ec2_instance_id]
   }
 
-  depends_on = [aws_volume_attachment.auth_service_data]
+  # Same reason as the document above: the association is what actually runs
+  # the script on the host, so it must not fire before the policy grant.
+  depends_on = [
+    aws_volume_attachment.auth_service_data,
+    aws_iam_role_policy.shared_ec2_auth_service_ssm_parameters,
+  ]
 }
