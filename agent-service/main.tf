@@ -243,8 +243,12 @@ locals {
     # startup by st-gateway's config.ts — it refuses to boot without them
     # rather than running with authentication silently off, so these must be
     # in place before the injecting image is deployed. auth-service is reached
-    # by bridge DNS: both containers are on authnet, and auth-service
-    # publishes no host port, so its container name is the only address.
+    # by bridge DNS: both containers are on authnet, so st-gateway addresses
+    # it by container name — the same idiom st-gateway's own AUTH_SERVICE_URL
+    # already uses, and unaffected by meta#80 step 3, which additionally
+    # publishes auth-service on 127.0.0.1 for the four --network host
+    # services. Bridge members use bridge DNS; host-network services use
+    # loopback. Neither needs the other's address.
     "docker run -d --name st-gateway --restart unless-stopped --network authnet --ip ${local.authnet_gateway_ip} -p 127.0.0.1:${var.gateway_port}:${var.gateway_port} -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 -e AUTH_SERVICE_URL=http://auth-service:${data.terraform_remote_state.auth_service.outputs.auth_service_port} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.gateway_image}",
     "docker pull ${var.agent_service_image}",
     "docker rm -f agent-service >/dev/null 2>&1 || true",

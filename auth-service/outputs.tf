@@ -26,7 +26,14 @@ output "auth_introspection_secret_parameter_name" {
   value       = aws_ssm_parameter.auth_introspection_secret.name
 }
 
+# THE FULL ENDPOINT URL, PATH INCLUDED — owner's decision, 2026-09-21.
+# RFC 7662 calls this the introspection endpoint, and an endpoint URL is used
+# verbatim: a client POSTs to exactly this string and never appends a path to
+# it. `contract.endpoint.path` in meta/fixtures/introspection.json describes
+# the route auth-service serves, not a suffix a caller adds. A base-URL form
+# was considered and rejected: it would put the same `/auth/v1/introspect`
+# literal in three client implementations to drift against.
 output "auth_introspection_url" {
-  description = "AUTH_INTROSPECTION_URL for the four --network host services (fleet, automation, navigation, agent), via the loopback-published port. st-gateway is on authnet and keeps using bridge DNS (http://auth-service:<port>/auth/v1/introspect), like its existing AUTH_SERVICE_URL."
+  description = "AUTH_INTROSPECTION_URL for the four --network host services (fleet, automation, navigation, agent), via the loopback-published port. This is the FULL endpoint URL including the /auth/v1/introspect path; clients use it verbatim and never append a path. st-gateway is on authnet and keeps using bridge DNS (http://auth-service:<port>/auth/v1/introspect), like its existing AUTH_SERVICE_URL."
   value       = "http://localhost:${var.auth_service_port}/auth/v1/introspect"
 }
