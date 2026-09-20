@@ -35,6 +35,26 @@ resource "aws_ssm_parameter" "auth_service_shared_secret" {
   value = random_password.auth_service_shared_secret.result
 }
 
+# meta#80 step 3 / decision 21. A SECOND, INDEPENDENT secret — deliberately a
+# separate random_password resource rather than a reuse of the one above, so
+# the two values can never coincide. This one is handed to every calling
+# service (fleet, automation, navigation, agent, st-gateway) in steps 4-9;
+# `auth_service_shared_secret` above is the vault key and stays with
+# st-gateway alone. Reusing the vault's secret here would hand four more
+# stacks the key to GET /auth/v1/token — see auth-design.md decision 9's
+# 2026-09-20 note, which is why this separation is load-bearing.
+# auth-service refuses to start if the two hold the same value.
+resource "random_password" "auth_introspection_secret" {
+  length  = 32
+  special = false
+}
+
+resource "aws_ssm_parameter" "auth_introspection_secret" {
+  name  = "auth-service-introspection-secret"
+  type  = "SecureString"
+  value = random_password.auth_introspection_secret.result
+}
+
 resource "aws_ssm_parameter" "clerk_jwt_key" {
   name  = "auth-service-clerk-jwt-key"
   type  = "SecureString"
@@ -55,6 +75,7 @@ resource "aws_iam_role_policy" "shared_ec2_auth_service_ssm_parameters" {
         Action = "ssm:GetParameter"
         Resource = [
           aws_ssm_parameter.auth_service_shared_secret.arn,
+          aws_ssm_parameter.auth_introspection_secret.arn,
           aws_ssm_parameter.clerk_jwt_key.arn,
         ]
       },
@@ -268,13 +289,48 @@ locals {
     "iptables -N authnet-out-guard 2>/dev/null || true",
     "iptables -F authnet-out-guard",
     "iptables -A authnet-out-guard -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN",
+    # meta#80 step 3 / decision 21: the ONE new rule. It lets a host process —
+    # and therefore any --network host container: fleet, automation,
+    # navigation, agent — open a NEW connection to auth-service's listener, so
+    # they can call POST /auth/v1/introspect. Everything else addressed to
+    # ${local.authnet_auth_service_ip} still falls through to the DROP below.
+    #
+    # It is a permitting rule inserted before the DROP, which is why it cannot
+    # reproduce the August/2026-08-23 outages: those came from an over-broad
+    # DROP, and a RETURN can only widen. auth-service-authnet-guard is NOT
+    # touched — st-gateway and Caddy reach auth-service over bridge DNS and
+    # that chain already returns for authnet sources.
+    #
+    # The accepted, temporary cost (auth-design.md decision 9's 2026-09-20
+    # note, owner's decision): this is a single process on a single port, so
+    # GET /auth/v1/token becomes network-reachable from those four services
+    # too. It stays guarded by AUTH_SERVICE_SHARED_SECRET, which no container
+    # but st-gateway and auth-service ever receives. That is what makes the
+    # SEPARATE introspection secret above load-bearing. The downgrade ends
+    # when the vault moves into st-gateway and the token route disappears.
+    "iptables -A authnet-out-guard -p tcp --dport ${var.auth_service_port} -j RETURN",
     "iptables -A authnet-out-guard -j DROP",
     "iptables -C OUTPUT -d ${local.authnet_auth_service_ip}/32 -j authnet-out-guard 2>/dev/null || iptables -I OUTPUT -d ${local.authnet_auth_service_ip}/32 -j authnet-out-guard",
     "AUTH_SERVICE_SHARED_SECRET=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.auth_service_shared_secret.name} --with-decryption --query Parameter.Value --output text)",
+    "AUTH_INTROSPECTION_SECRET=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.auth_introspection_secret.name} --with-decryption --query Parameter.Value --output text)",
     "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
     "docker pull ${var.auth_service_image}",
     "docker rm -f auth-service >/dev/null 2>&1 || true",
-    "docker run -d --name auth-service --restart unless-stopped --network authnet --ip ${local.authnet_auth_service_ip} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" ${var.auth_service_image}",
+    # -p 127.0.0.1:<port>:<port> (meta#80 step 3): loopback ONLY, exactly the
+    # form st-gateway already uses one stack over. The four --network host
+    # services then call http://localhost:${var.auth_service_port}/auth/v1/introspect,
+    # the same address shape they already use for st-gateway, with no
+    # knowledge of the bridge's IP plan. Chosen over handing them
+    # http://${local.authnet_auth_service_ip}:${var.auth_service_port} because
+    # the 127.0.0.1 bind keeps the listener off eth0 and every other external
+    # interface at the kernel level — the security group is then not the only
+    # thing standing between this port and the internet — and because it does
+    # not spread the hand-coordinated fixed-IP literal into four more stacks.
+    # Loopback traffic is DNAT'd to ${local.authnet_auth_service_ip}:${var.auth_service_port}
+    # in nat OUTPUT before filter OUTPUT runs, so it is the authnet-out-guard
+    # rule above, not the publish alone, that makes this reachable.
+    # The SQLite data volume mount is unchanged.
+    "docker run -d --name auth-service --restart unless-stopped --network authnet --ip ${local.authnet_auth_service_ip} -p 127.0.0.1:${var.auth_service_port}:${var.auth_service_port} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.auth_service_image}",
   ]
 }
 
