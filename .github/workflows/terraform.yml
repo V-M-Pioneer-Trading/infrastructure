@@ -29,9 +29,8 @@ jobs:
       run:
         working-directory: ${{ matrix.stack }}
     steps:
-      # Actions pinned to commit SHAs, not tags: tags are mutable, so a SHA is
-      # the only pin that cannot be moved under us. Dependabot
-      # (.github/dependabot.yml) keeps the pins current.
+      # Actions pinned to commit SHAs, not tags: tags are mutable and this repo
+      # is public. Dependabot (.github/dependabot.yml) keeps the pins current.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
