@@ -37,8 +37,10 @@ jobs:
         with:
           terraform_version: "1.13.0"
 
-      # fmt runs recursively once from the root; harmless to repeat per stack and
-      # keeps each matrix job self-contained.
+      # Note this does NOT run from the root: defaults.run.working-directory is
+      # the stack, so -recursive covers that stack's subtree only. Every .tf file
+      # in the repo lives under one of the matrix stacks, so between them the
+      # jobs still cover everything — add a stack here when you add a directory.
       - name: terraform fmt
         run: terraform fmt -check -recursive
 
