@@ -210,6 +210,30 @@ locals {
     "  fi",
     "fi",
     "systemctl enable --now docker",
+    # Same guarded, retrying reader as fleet-service's and auth-service's
+    # bootstraps (meta#80 step 5). From meta#80 step 6 the agent-service image
+    # refuses to start without AUTH_INTROSPECTION_SECRET, so an unguarded
+    # `$(...)` that read back empty (the AWS CLI prints nothing on
+    # AccessDenied, and `None` for a parameter that resolves to nothing) would
+    # replace a healthy container with a crash-looping one. The retry covers
+    # IAM propagation.
+    "read_secure_parameter() {",
+    "  _param_name=\"$1\"",
+    "  _param_value=\"\"",
+    "  _attempt=0",
+    "  while [ \"$_attempt\" -lt 12 ]; do",
+    "    _attempt=$((_attempt + 1))",
+    "    _param_value=$(aws ssm get-parameter --region ${var.aws_region} --name \"$_param_name\" --with-decryption --query Parameter.Value --output text 2>/dev/null || true)",
+    "    if [ -n \"$_param_value\" ] && [ \"$_param_value\" != None ]; then",
+    "      printf '%s' \"$_param_value\"",
+    "      return 0",
+    "    fi",
+    "    echo \"waiting for SSM parameter $_param_name to read back non-empty (attempt $_attempt/12)\" >&2",
+    "    sleep 5",
+    "  done",
+    "  echo \"FATAL: SSM parameter $_param_name read back empty after ~60s. Refusing to restart agent-service with an empty secret; the running containers are untouched.\" >&2",
+    "  return 1",
+    "}",
     "MYSQL_ROOT_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_root_password.name} --with-decryption --query Parameter.Value --output text)",
     "MYSQL_APP_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_app_password.name} --with-decryption --query Parameter.Value --output text)",
     "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
@@ -218,6 +242,14 @@ locals {
     # granted GetParameter on it there, so no extra IAM is needed here — only
     # the name, read from that stack's output.
     "AUTH_SERVICE_SHARED_SECRET=$(aws ssm get-parameter --region ${var.aws_region} --name ${data.terraform_remote_state.auth_service.outputs.auth_service_shared_secret_parameter_name} --with-decryption --query Parameter.Value --output text)",
+    # agent-service's caller secret for auth-service's introspection route
+    # (meta#80 step 6). The parameter and its GetParameter grant belong to
+    # auth-service's stack (step 3); only the name is read here. Read BEFORE
+    # the first `docker rm -f` below, so a failed read aborts with MySQL,
+    # st-gateway and agent-service all still running. agent-service only:
+    # st-gateway's container is not given it (its step is meta#80 step 9).
+    "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_introspection_secret_parameter_name}) || exit 1",
+    "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
     "docker rm -f agent-service-mysql >/dev/null 2>&1 || true",
     # Pinned to the current major (9) rather than :latest — an unpinned tag would
     # silently pull the next MySQL major on the next host rebuild, risking an
@@ -250,9 +282,47 @@ locals {
     # services. Bridge members use bridge DNS; host-network services use
     # loopback. Neither needs the other's address.
     "docker run -d --name st-gateway --restart unless-stopped --network authnet --ip ${local.authnet_gateway_ip} -p 127.0.0.1:${var.gateway_port}:${var.gateway_port} -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 -e AUTH_SERVICE_URL=http://auth-service:${data.terraform_remote_state.auth_service.outputs.auth_service_port} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.gateway_image}",
+    # Image digest before and after the pull, as in fleet-service's and
+    # auth-service's bootstraps: the tag is `:latest`, so the SSM command
+    # output is what says whether this run changed the image.
+    "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.agent_service_image} 2>/dev/null || true)",
+    "echo \"agent-service image digest before pull: $IMAGE_DIGEST_BEFORE\"",
     "docker pull ${var.agent_service_image}",
+    "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.agent_service_image} 2>/dev/null || true)",
+    "echo \"agent-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
     "docker rm -f agent-service >/dev/null 2>&1 || true",
-    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.agent_service_image}",
+    # CLERK_JWT_KEY/CLERK_ISSUER stay injected until meta#80 step 10: an image
+    # from before step 6 still needs them, and redeploying the previous image
+    # tag is this service's rollback. The migrated image ignores them.
+    # AUTH_INTROSPECTION_URL is the FULL endpoint URL, used verbatim.
+    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.agent_service_image}",
+    # `docker run -d` returning 0 only means the container was created. From
+    # meta#80 step 6 the image refuses to start on a missing or bad
+    # AUTH_INTROSPECTION_* value, and it reads them before waiting for MySQL.
+    # With --restart unless-stopped such a container is restarted over and
+    # over, and Docker reports State.Running=true for most of that loop, so
+    # a running check passes a crash-looping container. Poll /health
+    # instead: it answers only once the server is listening, which is after
+    # the MySQL wait (up to 30 s), hence ~90 s here. Then a non-zero exit so
+    # the SSM command is reported as Failed rather than Success. Same check
+    # as fleet-service's and auth-service's bootstraps.
+    "AGENT_HEALTHY=no",
+    "_attempt=0",
+    "while [ \"$_attempt\" -lt 30 ]; do",
+    "  _attempt=$((_attempt + 1))",
+    "  if curl -fs -o /dev/null --max-time 2 http://127.0.0.1:${var.agent_service_port}/health; then",
+    "    AGENT_HEALTHY=yes",
+    "    break",
+    "  fi",
+    "  sleep 3",
+    "done",
+    "if [ \"$AGENT_HEALTHY\" != yes ]; then",
+    "  echo 'FATAL: agent-service did not answer GET /health on 127.0.0.1:${var.agent_service_port} within ~90s of docker run. Container state, restart count and the last 50 log lines follow.' >&2",
+    "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} err={{.State.Error}}' agent-service >&2 2>/dev/null || echo 'no such container' >&2",
+    "  docker logs --tail 50 agent-service >&2 2>&1 || true",
+    "  exit 1",
+    "fi",
+    "echo \"agent-service is running on port ${var.agent_service_port}.\"",
   ]
 }
 
