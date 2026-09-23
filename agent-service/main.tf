@@ -298,23 +298,27 @@ locals {
     "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.agent_service_image}",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 6 the image refuses to start on a missing or bad
-    # AUTH_INTROSPECTION_* value, and it reads them before waiting for MySQL,
-    # so that shows up as a container that is no longer running a moment
-    # later. Short retry, then a non-zero exit so the SSM command is reported
-    # as Failed rather than Success. Same check as fleet-service's bootstrap.
-    "AGENT_RUNNING=no",
+    # AUTH_INTROSPECTION_* value, and it reads them before waiting for MySQL.
+    # With --restart unless-stopped such a container is restarted over and
+    # over, and Docker reports State.Running=true for most of that loop, so
+    # a running check passes a crash-looping container. Poll /health
+    # instead: it answers only once the server is listening, which is after
+    # the MySQL wait (up to 30 s), hence ~90 s here. Then a non-zero exit so
+    # the SSM command is reported as Failed rather than Success. Same check
+    # as fleet-service's and auth-service's bootstraps.
+    "AGENT_HEALTHY=no",
     "_attempt=0",
-    "while [ \"$_attempt\" -lt 10 ]; do",
+    "while [ \"$_attempt\" -lt 30 ]; do",
     "  _attempt=$((_attempt + 1))",
-    "  if [ \"$(docker inspect -f '{{.State.Running}}' agent-service 2>/dev/null || echo false)\" = true ]; then",
-    "    AGENT_RUNNING=yes",
+    "  if curl -fs -o /dev/null --max-time 2 http://127.0.0.1:${var.agent_service_port}/health; then",
+    "    AGENT_HEALTHY=yes",
     "    break",
     "  fi",
     "  sleep 3",
     "done",
-    "if [ \"$AGENT_RUNNING\" != yes ]; then",
-    "  echo 'FATAL: agent-service is not running ~30s after docker run. Container state and the last 50 log lines follow.' >&2",
-    "  docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' agent-service >&2 2>/dev/null || echo 'no such container' >&2",
+    "if [ \"$AGENT_HEALTHY\" != yes ]; then",
+    "  echo 'FATAL: agent-service did not answer GET /health on 127.0.0.1:${var.agent_service_port} within ~90s of docker run. Container state, restart count and the last 50 log lines follow.' >&2",
+    "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} err={{.State.Error}}' agent-service >&2 2>/dev/null || echo 'no such container' >&2",
     "  docker logs --tail 50 agent-service >&2 2>&1 || true",
     "  exit 1",
     "fi",

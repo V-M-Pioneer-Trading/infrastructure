@@ -429,25 +429,28 @@ locals {
     "docker run -d --name auth-service --restart unless-stopped --network authnet --ip ${local.authnet_auth_service_ip} -p 127.0.0.1:${var.auth_service_port}:${var.auth_service_port} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.auth_service_image}",
     # `docker run -d` returning 0 only means the container was created. A bind
     # failure on 127.0.0.1:${var.auth_service_port}, or a config the service
-    # refuses to start with, shows up as a container that is no longer
-    # running a moment later — and the vault is then DOWN. Short retry, then
+    # refuses to start with, leaves the vault DOWN. With --restart
+    # unless-stopped such a container is restarted over and over, and Docker
+    # reports State.Running=true for most of that loop, so a running check
+    # passes a crash-looping container. Poll /health through the loopback
+    # publish for up to ~90 s instead (which also proves the publish), then
     # a non-zero exit so the SSM command is reported as Failed rather than
     # Success. (`set -euo pipefail` is the first runCommand line, but this
     # check is explicit so the failure has a readable message and does not
     # depend on it.)
-    "AUTH_RUNNING=no",
+    "AUTH_HEALTHY=no",
     "_attempt=0",
-    "while [ \"$_attempt\" -lt 10 ]; do",
+    "while [ \"$_attempt\" -lt 30 ]; do",
     "  _attempt=$((_attempt + 1))",
-    "  if [ \"$(docker inspect -f '{{.State.Running}}' auth-service 2>/dev/null || echo false)\" = true ]; then",
-    "    AUTH_RUNNING=yes",
+    "  if curl -fs -o /dev/null --max-time 2 http://127.0.0.1:${var.auth_service_port}/health; then",
+    "    AUTH_HEALTHY=yes",
     "    break",
     "  fi",
     "  sleep 3",
     "done",
-    "if [ \"$AUTH_RUNNING\" != yes ]; then",
-    "  echo 'FATAL: auth-service is not running ~30s after docker run. The credential vault and the introspection route are DOWN on this host. Container state and the last 50 log lines follow.' >&2",
-    "  docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' auth-service >&2 2>/dev/null || echo 'no such container' >&2",
+    "if [ \"$AUTH_HEALTHY\" != yes ]; then",
+    "  echo 'FATAL: auth-service did not answer GET /health on 127.0.0.1:${var.auth_service_port} within ~90s of docker run. The credential vault and the introspection route are DOWN on this host. Container state, restart count and the last 50 log lines follow.' >&2",
+    "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} err={{.State.Error}}' auth-service >&2 2>/dev/null || echo 'no such container' >&2",
     "  docker logs --tail 50 auth-service >&2 2>&1 || true",
     "  exit 1",
     "fi",
