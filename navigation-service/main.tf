@@ -35,10 +35,10 @@ data "aws_kms_alias" "ssm" {
   name = "alias/aws/ssm"
 }
 
-# navigation-service verifies Clerk session JWTs locally (auth-design.md decision
-# 10) and refuses to start without a trust anchor, so this parameter is
-# load-bearing: a host rebuild that cannot read it leaves the container
-# crash-looping, never running unauthenticated. Same pattern as fleet-service.
+# Until meta#80 step 7 navigation-service verified Clerk session JWTs locally
+# (auth-design.md decision 10) and refused to start without this key. The
+# migrated image ignores it; it stays injected until step 10 so that
+# redeploying the previous image tag, this service's rollback, still works.
 resource "aws_ssm_parameter" "clerk_jwt_key" {
   name  = "navigation-service-clerk-jwt-key"
   type  = "SecureString"
@@ -160,12 +160,15 @@ locals {
     # crash-looping container. Poll /health instead, then a non-zero exit so
     # the SSM command is reported as Failed rather than Success. Same check as
     # fleet-service's, agent-service's and auth-service's bootstraps, but with
-    # a longer window (40 x 3 s, ~120 s instead of ~90 s): navigation-service
-    # is a Spring Boot JVM, and on this shared t-class host its cold start
-    # takes noticeably longer than the Node and Go services' to answer.
+    # a longer window (60 x 3 s, ~180 s instead of ~90 s): navigation-service
+    # is a Spring Boot JVM, and on this shared t4g host a cold start with
+    # drained CPU credits, or alongside other containers starting, takes far
+    # longer than the Node and Go services' to answer. The window is headroom,
+    # not a measurement; a healthy container that answers late is not removed
+    # by a Failed command, only reported.
     "NAVIGATION_HEALTHY=no",
     "_attempt=0",
-    "while [ \"$_attempt\" -lt 40 ]; do",
+    "while [ \"$_attempt\" -lt 60 ]; do",
     "  _attempt=$((_attempt + 1))",
     "  if curl -fs -o /dev/null --max-time 2 http://127.0.0.1:${var.navigation_service_port}/health; then",
     "    NAVIGATION_HEALTHY=yes",
@@ -174,7 +177,7 @@ locals {
     "  sleep 3",
     "done",
     "if [ \"$NAVIGATION_HEALTHY\" != yes ]; then",
-    "  echo 'FATAL: navigation-service did not answer GET /health on 127.0.0.1:${var.navigation_service_port} within ~120s of docker run. Container state, restart count and the last 50 log lines follow.' >&2",
+    "  echo 'FATAL: navigation-service did not answer GET /health on 127.0.0.1:${var.navigation_service_port} within ~180s of docker run. Container state, restart count and the last 50 log lines follow.' >&2",
     "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} err={{.State.Error}}' navigation-service >&2 2>/dev/null || echo 'no such container' >&2",
     "  docker logs --tail 50 navigation-service >&2 2>&1 || true",
     "  exit 1",
