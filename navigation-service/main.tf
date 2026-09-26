@@ -12,6 +12,20 @@ data "terraform_remote_state" "personal" {
   }
 }
 
+# auth-service publishes the introspection endpoint URL and the name of the
+# SSM parameter holding the caller secret (meta#80 step 3). Read, not
+# redeclared: the shared EC2 role is already allowed GetParameter on that
+# parameter by auth-service's own policy, so this stack needs no IAM for it.
+data "terraform_remote_state" "auth_service" {
+  backend = "s3"
+
+  config = {
+    bucket = var.state_bucket
+    key    = "auth-service/terraform.tfstate"
+    region = var.aws_region
+  }
+}
+
 data "aws_instance" "navigation_service_host" {
   instance_id = var.ec2_instance_id
 }
@@ -91,15 +105,81 @@ locals {
     "  fi",
     "fi",
     "systemctl enable --now docker",
-    "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
+    # Secret reads, all BEFORE `docker rm -f`, and a failed or empty read
+    # aborts the script with the running container untouched. From meta#80
+    # step 7 the image refuses to start without AUTH_INTROSPECTION_SECRET, so
+    # an unguarded `$(...)` that read back empty (the AWS CLI prints nothing
+    # on AccessDenied, and `None` for a parameter that resolves to nothing)
+    # would replace a healthy container with a crash-looping one. Same guard
+    # and retry as fleet-service's and auth-service's bootstraps; the retry
+    # covers IAM propagation.
+    "read_secure_parameter() {",
+    "  _param_name=\"$1\"",
+    "  _param_value=\"\"",
+    "  _attempt=0",
+    "  while [ \"$_attempt\" -lt 12 ]; do",
+    "    _attempt=$((_attempt + 1))",
+    "    _param_value=$(aws ssm get-parameter --region ${var.aws_region} --name \"$_param_name\" --with-decryption --query Parameter.Value --output text 2>/dev/null || true)",
+    "    if [ -n \"$_param_value\" ] && [ \"$_param_value\" != None ]; then",
+    "      printf '%s' \"$_param_value\"",
+    "      return 0",
+    "    fi",
+    "    echo \"waiting for SSM parameter $_param_name to read back non-empty (attempt $_attempt/12)\" >&2",
+    "    sleep 5",
+    "  done",
+    "  echo \"FATAL: SSM parameter $_param_name read back empty after ~60s. Refusing to restart navigation-service with an empty secret; the running container is untouched.\" >&2",
+    "  return 1",
+    "}",
+    # CLERK_JWT_KEY/CLERK_ISSUER stay injected until step 10: an image from
+    # before step 7 still needs them, and redeploying the previous image tag
+    # is this service's rollback. The migrated image ignores them.
+    "CLERK_JWT_KEY=$(read_secure_parameter ${aws_ssm_parameter.clerk_jwt_key.name}) || exit 1",
+    "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_introspection_secret_parameter_name}) || exit 1",
+    "[ -n \"$CLERK_JWT_KEY\" ] || { echo 'FATAL: CLERK_JWT_KEY is empty.' >&2; exit 1; }",
+    "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
+    # Image digest before and after the pull, as in fleet-service's and
+    # auth-service's bootstraps: the tag is `:latest`, so the SSM command
+    # output is what says whether this run changed the image.
+    "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.navigation_service_image} 2>/dev/null || true)",
+    "echo \"navigation-service image digest before pull: $IMAGE_DIGEST_BEFORE\"",
     "docker pull ${var.navigation_service_image}",
+    "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.navigation_service_image} 2>/dev/null || true)",
+    "echo \"navigation-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
     "docker rm -f navigation-service >/dev/null 2>&1 || true",
     // --network host (not -p port:8080, unlike the pre-existing config): navigation-service calls
     // st-gateway via ST_GATEWAY_URL, defaulting to http://localhost:3002 — under bridge networking
     // that "localhost" is the container's own loopback, not the shared EC2 host where st-gateway
     // actually listens, so every upstream SpaceTraders call connection-refused (meta bug, found
     // while investigating prod's /api/v1/systems/*/waypoints 500s).
-    "docker run -d --name navigation-service --restart unless-stopped --network host -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.navigation_service_image}",
+    "docker run -d --name navigation-service --restart unless-stopped --network host -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.navigation_service_image}",
+    # `docker run -d` returning 0 only means the container was created. From
+    # meta#80 step 7 the image refuses to start on a missing or bad
+    # AUTH_INTROSPECTION_* value. With --restart unless-stopped such a
+    # container is restarted over and over, and Docker reports
+    # State.Running=true for most of that loop, so a running check passes a
+    # crash-looping container. Poll /health instead, then a non-zero exit so
+    # the SSM command is reported as Failed rather than Success. Same check as
+    # fleet-service's, agent-service's and auth-service's bootstraps, but with
+    # a longer window (40 x 3 s, ~120 s instead of ~90 s): navigation-service
+    # is a Spring Boot JVM, and on this shared t-class host its cold start
+    # takes noticeably longer than the Node and Go services' to answer.
+    "NAVIGATION_HEALTHY=no",
+    "_attempt=0",
+    "while [ \"$_attempt\" -lt 40 ]; do",
+    "  _attempt=$((_attempt + 1))",
+    "  if curl -fs -o /dev/null --max-time 2 http://127.0.0.1:${var.navigation_service_port}/health; then",
+    "    NAVIGATION_HEALTHY=yes",
+    "    break",
+    "  fi",
+    "  sleep 3",
+    "done",
+    "if [ \"$NAVIGATION_HEALTHY\" != yes ]; then",
+    "  echo 'FATAL: navigation-service did not answer GET /health on 127.0.0.1:${var.navigation_service_port} within ~120s of docker run. Container state, restart count and the last 50 log lines follow.' >&2",
+    "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} err={{.State.Error}}' navigation-service >&2 2>/dev/null || echo 'no such container' >&2",
+    "  docker logs --tail 50 navigation-service >&2 2>&1 || true",
+    "  exit 1",
+    "fi",
+    "echo \"navigation-service is running on port ${var.navigation_service_port}.\"",
   ]
 }
 
