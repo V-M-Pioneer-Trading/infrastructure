@@ -57,12 +57,6 @@ resource "aws_ssm_parameter" "mysql_app_password" {
   value = random_password.mysql_app.result
 }
 
-resource "aws_ssm_parameter" "clerk_jwt_key" {
-  name  = "agent-service-clerk-jwt-key"
-  type  = "SecureString"
-  value = var.clerk_jwt_key
-}
-
 # Lets the shared host's bootstrap script read these SecureString parameters at
 # container-start time, mirroring how navigation-service's GHCR PAT used to work.
 resource "aws_iam_role_policy" "shared_ec2_agent_service_ssm_parameters" {
@@ -78,7 +72,6 @@ resource "aws_iam_role_policy" "shared_ec2_agent_service_ssm_parameters" {
         Resource = [
           aws_ssm_parameter.mysql_root_password.arn,
           aws_ssm_parameter.mysql_app_password.arn,
-          aws_ssm_parameter.clerk_jwt_key.arn,
         ]
       },
       {
@@ -238,7 +231,6 @@ locals {
     "}",
     "MYSQL_ROOT_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_root_password.name} --with-decryption --query Parameter.Value --output text)",
     "MYSQL_APP_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_app_password.name} --with-decryption --query Parameter.Value --output text)",
-    "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
     # st-gateway's half of the auth-service shared secret (decision 5). The
     # parameter belongs to auth-service's stack; the shared EC2 role is already
     # granted GetParameter on it there, so no extra IAM is needed here — only
@@ -276,13 +268,10 @@ locals {
     # instead.
     # AUTH_SERVICE_SHARED_SECRET is required at startup by st-gateway's
     # config.ts — it refuses to boot without it rather than running with
-    # authentication silently off. CLERK_JWT_KEY was likewise required until
-    # meta#80 step 9; from step 9 the image verifies tokens through
-    # auth-service's introspection route instead and refuses to start without
-    # AUTH_INTROSPECTION_URL and AUTH_INTROSPECTION_SECRET. CLERK_JWT_KEY and
-    # CLERK_ISSUER stay injected until step 10: an image from before step 9
-    # still needs them, and redeploying the previous image tag is
-    # st-gateway's rollback. The migrated image ignores them.
+    # authentication silently off. Token verification is auth-service's (decision
+    # 21, meta#80): st-gateway verifies tokens through auth-service's
+    # introspection route and refuses to start without AUTH_INTROSPECTION_URL and
+    # AUTH_INTROSPECTION_SECRET; it holds no Clerk verification key.
     # AUTH_INTROSPECTION_URL is the FULL endpoint URL, used verbatim, and is
     # deliberately NOT the remote-state output auth_introspection_url: that
     # value (http://localhost:<port>/auth/v1/introspect) is the host loopback
@@ -297,7 +286,7 @@ locals {
     # publishes auth-service on 127.0.0.1 for the four --network host
     # services. Bridge members use bridge DNS; host-network services use
     # loopback. Neither needs the other's address.
-    "docker run -d --name st-gateway --restart unless-stopped --network authnet --ip ${local.authnet_gateway_ip} -p 127.0.0.1:${var.gateway_port}:${var.gateway_port} -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 -e AUTH_SERVICE_URL=http://auth-service:${data.terraform_remote_state.auth_service.outputs.auth_service_port} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_INTROSPECTION_URL=http://auth-service:${data.terraform_remote_state.auth_service.outputs.auth_service_port}/auth/v1/introspect -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.gateway_image}",
+    "docker run -d --name st-gateway --restart unless-stopped --network authnet --ip ${local.authnet_gateway_ip} -p 127.0.0.1:${var.gateway_port}:${var.gateway_port} -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 -e AUTH_SERVICE_URL=http://auth-service:${data.terraform_remote_state.auth_service.outputs.auth_service_port} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_URL=http://auth-service:${data.terraform_remote_state.auth_service.outputs.auth_service_port}/auth/v1/introspect -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.gateway_image}",
     # Same /health poll as agent-service's below, for the same reason:
     # `docker run -d` returning 0 only means the container was created, and a
     # crash-looping container reports State.Running=true for most of its
@@ -332,11 +321,10 @@ locals {
     "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.agent_service_image} 2>/dev/null || true)",
     "echo \"agent-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
     "docker rm -f agent-service >/dev/null 2>&1 || true",
-    # CLERK_JWT_KEY/CLERK_ISSUER stay injected until meta#80 step 10: an image
-    # from before step 6 still needs them, and redeploying the previous image
-    # tag is this service's rollback. The migrated image ignores them.
+    # Token verification is auth-service's (decision 21, meta#80); this service
+    # holds no Clerk verification key.
     # AUTH_INTROSPECTION_URL is the FULL endpoint URL, used verbatim.
-    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.agent_service_image}",
+    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.agent_service_image}",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 6 the image refuses to start on a missing or bad
     # AUTH_INTROSPECTION_* value, and it reads them before waiting for MySQL.

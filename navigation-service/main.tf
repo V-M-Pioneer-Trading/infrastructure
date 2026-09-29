@@ -35,16 +35,9 @@ data "aws_kms_alias" "ssm" {
   name = "alias/aws/ssm"
 }
 
-# Until meta#80 step 7 navigation-service verified Clerk session JWTs locally
-# (auth-design.md decision 10) and refused to start without this key. The
-# migrated image ignores it; it stays injected until step 10 so that
-# redeploying the previous image tag, this service's rollback, still works.
-resource "aws_ssm_parameter" "clerk_jwt_key" {
-  name  = "navigation-service-clerk-jwt-key"
-  type  = "SecureString"
-  value = var.clerk_jwt_key
-}
-
+# Lets the shared host's bootstrap script decrypt SecureString parameters it
+# reads at container-start time (the parameters themselves are granted in
+# their owning stacks).
 resource "aws_iam_role_policy" "shared_ec2_navigation_service_ssm_parameters" {
   name = "navigation-service-ssm-parameters"
   role = data.terraform_remote_state.personal.outputs.ec2_role_name
@@ -52,11 +45,6 @@ resource "aws_iam_role_policy" "shared_ec2_navigation_service_ssm_parameters" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Effect   = "Allow"
-        Action   = "ssm:GetParameter"
-        Resource = aws_ssm_parameter.clerk_jwt_key.arn
-      },
       {
         Effect   = "Allow"
         Action   = "kms:Decrypt"
@@ -130,12 +118,7 @@ locals {
     "  echo \"FATAL: SSM parameter $_param_name read back empty after ~60s. Refusing to restart navigation-service with an empty secret; the running container is untouched.\" >&2",
     "  return 1",
     "}",
-    # CLERK_JWT_KEY/CLERK_ISSUER stay injected until step 10: an image from
-    # before step 7 still needs them, and redeploying the previous image tag
-    # is this service's rollback. The migrated image ignores them.
-    "CLERK_JWT_KEY=$(read_secure_parameter ${aws_ssm_parameter.clerk_jwt_key.name}) || exit 1",
     "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_introspection_secret_parameter_name}) || exit 1",
-    "[ -n \"$CLERK_JWT_KEY\" ] || { echo 'FATAL: CLERK_JWT_KEY is empty.' >&2; exit 1; }",
     "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
     # Image digest before and after the pull, as in fleet-service's and
     # auth-service's bootstraps: the tag is `:latest`, so the SSM command
@@ -151,7 +134,9 @@ locals {
     // that "localhost" is the container's own loopback, not the shared EC2 host where st-gateway
     // actually listens, so every upstream SpaceTraders call connection-refused (meta bug, found
     // while investigating prod's /api/v1/systems/*/waypoints 500s).
-    "docker run -d --name navigation-service --restart unless-stopped --network host -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.navigation_service_image}",
+    # Token verification is auth-service's (decision 21, meta#80); this service
+    # holds no Clerk verification key.
+    "docker run -d --name navigation-service --restart unless-stopped --network host -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.navigation_service_image}",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 7 the image refuses to start on a missing or bad
     # AUTH_INTROSPECTION_* value. With --restart unless-stopped such a

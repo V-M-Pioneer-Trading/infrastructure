@@ -41,14 +41,9 @@ data "aws_kms_alias" "ssm" {
   name = "alias/aws/ssm"
 }
 
-resource "aws_ssm_parameter" "clerk_jwt_key" {
-  name  = "fleet-service-clerk-jwt-key"
-  type  = "SecureString"
-  value = var.clerk_jwt_key
-}
-
-# Lets the shared host's bootstrap script read this SecureString parameter at
-# container-start time, mirroring agent-service's MySQL password pattern.
+# Lets the shared host's bootstrap script decrypt SecureString parameters it
+# reads at container-start time (the parameters themselves are granted in
+# their owning stacks).
 resource "aws_iam_role_policy" "shared_ec2_fleet_service_ssm_parameters" {
   name = "fleet-service-ssm-parameters"
   role = data.terraform_remote_state.personal.outputs.ec2_role_name
@@ -56,11 +51,6 @@ resource "aws_iam_role_policy" "shared_ec2_fleet_service_ssm_parameters" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Effect   = "Allow"
-        Action   = "ssm:GetParameter"
-        Resource = aws_ssm_parameter.clerk_jwt_key.arn
-      },
       {
         Effect   = "Allow"
         Action   = "kms:Decrypt"
@@ -117,12 +107,7 @@ locals {
     "  echo \"FATAL: SSM parameter $_param_name read back empty after ~60s. Refusing to restart fleet-service with an empty secret; the running container is untouched.\" >&2",
     "  return 1",
     "}",
-    # CLERK_JWT_KEY/CLERK_ISSUER stay injected until step 10: an image from
-    # before step 5 still needs them, and redeploying the previous image tag
-    # is this service's rollback. The migrated image ignores them.
-    "CLERK_JWT_KEY=$(read_secure_parameter ${aws_ssm_parameter.clerk_jwt_key.name}) || exit 1",
     "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_introspection_secret_parameter_name}) || exit 1",
-    "[ -n \"$CLERK_JWT_KEY\" ] || { echo 'FATAL: CLERK_JWT_KEY is empty.' >&2; exit 1; }",
     "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
     # Image digest before and after the pull, as in auth-service's bootstrap:
     # the tag is `:latest`, so the SSM command output is what says whether
@@ -133,7 +118,9 @@ locals {
     "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.fleet_service_image} 2>/dev/null || true)",
     "echo \"fleet-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
     "docker rm -f fleet-service >/dev/null 2>&1 || true",
-    "docker run -d --name fleet-service --restart unless-stopped --network host -e PORT=${var.fleet_service_port} -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.fleet_service_image}",
+    # Token verification is auth-service's (decision 21, meta#80); this service
+    # holds no Clerk verification key.
+    "docker run -d --name fleet-service --restart unless-stopped --network host -e PORT=${var.fleet_service_port} -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.fleet_service_image}",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 5 the image refuses to start on a missing or bad
     # AUTH_INTROSPECTION_* value. With --restart unless-stopped such a
