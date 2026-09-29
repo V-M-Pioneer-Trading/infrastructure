@@ -22,8 +22,7 @@ data "aws_kms_alias" "ssm" {
 }
 
 # Self-generated: this secret only needs the two of them (st-gateway,
-# auth-service) to agree, same reasoning as automation-service's
-# ai_service_secret — nothing external mints it, so Terraform can.
+# auth-service) to agree: nothing external mints it, so Terraform can.
 resource "random_password" "auth_service_shared_secret" {
   length  = 32
   special = false

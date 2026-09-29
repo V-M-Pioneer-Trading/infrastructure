@@ -72,30 +72,10 @@ resource "aws_ssm_parameter" "postgres_password" {
   value = random_password.postgres.result
 }
 
-# Self-generated: ai-service isn't deployed yet (see operations.md), so nothing
-# external needs to agree on this value today. Whoever stands up ai-service's
-# own stack reads it from this same parameter rather than minting a second one.
-resource "random_password" "ai_service_secret" {
-  length  = 32
-  special = false
-}
-
-resource "aws_ssm_parameter" "ai_service_secret" {
-  name  = "automation-service-ai-service-secret"
-  type  = "SecureString"
-  value = random_password.ai_service_secret.result
-}
-
-resource "aws_ssm_parameter" "clerk_jwt_key" {
-  name  = "automation-service-clerk-jwt-key"
-  type  = "SecureString"
-  value = var.clerk_jwt_key
-}
-
 # auth-design.md decision 19: this service is itself a caller of agent/fleet
 # -service, so it also needs a credential to *sign* an outbound Authorization
-# with — a dedicated Clerk Machine's Secret Key, not the verification key
-# above. No default (see variables.tf) — Clerk mints this, not Terraform.
+# with — a dedicated Clerk Machine's Secret Key. No default (see variables.tf)
+# — Clerk mints this, not Terraform.
 resource "aws_ssm_parameter" "clerk_m2m_secret_key" {
   name  = "automation-service-clerk-m2m-secret-key"
   type  = "SecureString"
@@ -116,8 +96,6 @@ resource "aws_iam_role_policy" "shared_ec2_automation_service_ssm_parameters" {
         Action = "ssm:GetParameter"
         Resource = [
           aws_ssm_parameter.postgres_password.arn,
-          aws_ssm_parameter.ai_service_secret.arn,
-          aws_ssm_parameter.clerk_jwt_key.arn,
           aws_ssm_parameter.clerk_m2m_secret_key.arn,
         ]
       },
@@ -277,18 +255,10 @@ locals {
     "  echo \"FATAL: SSM parameter $_param_name read back empty after ~60s. Refusing to restart automation-service with an empty secret; the running containers are untouched.\" >&2",
     "  return 1",
     "}",
-    # CLERK_JWT_KEY/CLERK_ISSUER and AI_SERVICE_SECRET stay injected until
-    # step 10: an image from before step 8 still needs them, and redeploying
-    # the previous image tag is this service's rollback. The migrated image
-    # ignores them.
     "POSTGRES_PASSWORD=$(read_secure_parameter ${aws_ssm_parameter.postgres_password.name}) || exit 1",
-    "AI_SERVICE_SECRET=$(read_secure_parameter ${aws_ssm_parameter.ai_service_secret.name}) || exit 1",
-    "CLERK_JWT_KEY=$(read_secure_parameter ${aws_ssm_parameter.clerk_jwt_key.name}) || exit 1",
     "CLERK_M2M_SECRET_KEY=$(read_secure_parameter ${aws_ssm_parameter.clerk_m2m_secret_key.name}) || exit 1",
     "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_introspection_secret_parameter_name}) || exit 1",
     "[ -n \"$POSTGRES_PASSWORD\" ] || { echo 'FATAL: POSTGRES_PASSWORD is empty.' >&2; exit 1; }",
-    "[ -n \"$AI_SERVICE_SECRET\" ] || { echo 'FATAL: AI_SERVICE_SECRET is empty.' >&2; exit 1; }",
-    "[ -n \"$CLERK_JWT_KEY\" ] || { echo 'FATAL: CLERK_JWT_KEY is empty.' >&2; exit 1; }",
     "[ -n \"$CLERK_M2M_SECRET_KEY\" ] || { echo 'FATAL: CLERK_M2M_SECRET_KEY is empty.' >&2; exit 1; }",
     "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
     "docker rm -f automation-service-postgres >/dev/null 2>&1 || true",
@@ -303,7 +273,9 @@ locals {
     "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.automation_service_image} 2>/dev/null || true)",
     "echo \"automation-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
     "docker rm -f automation-service >/dev/null 2>&1 || true",
-    "docker run -d --name automation-service --restart unless-stopped --network host -e PORT=${var.automation_service_port} -e DATABASE_URL=\"postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/automation\" -e NAVIGATION_SERVICE_URL=http://localhost:${data.terraform_remote_state.navigation_service.outputs.navigation_service_port}/api/navigation/v1 -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e FLEET_SERVICE_URL=http://localhost:${data.terraform_remote_state.fleet_service.outputs.fleet_service_port}/api/fleet/v1 -e MINING_SHIP_SYMBOL=${var.mining_ship_symbol} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AI_SERVICE_SECRET=\"$AI_SERVICE_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e CLERK_M2M_SECRET_KEY=\"$CLERK_M2M_SECRET_KEY\" -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.automation_service_image}",
+    # Token verification is auth-service's (decision 21, meta#80); this service
+    # holds no Clerk verification key.
+    "docker run -d --name automation-service --restart unless-stopped --network host -e PORT=${var.automation_service_port} -e DATABASE_URL=\"postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/automation\" -e NAVIGATION_SERVICE_URL=http://localhost:${data.terraform_remote_state.navigation_service.outputs.navigation_service_port}/api/navigation/v1 -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e FLEET_SERVICE_URL=http://localhost:${data.terraform_remote_state.fleet_service.outputs.fleet_service_port}/api/fleet/v1 -e MINING_SHIP_SYMBOL=${var.mining_ship_symbol} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_M2M_SECRET_KEY=\"$CLERK_M2M_SECRET_KEY\" -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.automation_service_image}",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 8 the image refuses to start on a missing or bad
     # AUTH_INTROSPECTION_* value. With --restart unless-stopped such a

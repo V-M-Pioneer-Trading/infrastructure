@@ -45,26 +45,10 @@ variable "mining_ship_symbol" {
   type        = string
 }
 
-# No default: this is the spacetraders Clerk instance's RS256 public key
-# (PEM/SPKI), fetched from its JWKS endpoint — not a secret, but nothing
-# guesses it, so it must be supplied explicitly at apply time.
-variable "clerk_jwt_key" {
-  description = "Clerk RS256 public key (PEM/SPKI) automation-service uses to verify session JWTs."
-  type        = string
-  sensitive   = true
-}
-
-variable "clerk_issuer" {
-  description = "Expected `iss` claim on Clerk session JWTs — narrows misconfiguration, verification itself relies on the key above."
-  type        = string
-  default     = "https://uncommon-crayfish-6401.clerk.accounts.dev"
-}
-
 # No default: a real Clerk Machine's Secret Key (auth-design.md decision
-# 19), which only Clerk mints — this is a genuine bearer credential, unlike
-# clerk_jwt_key above (a public key). Lets automation-service mint its own
-# M2M token to call agent/fleet-service, since it has no human Clerk session
-# to present the way command-interface does.
+# 19), which only Clerk mints — a genuine bearer credential. Lets
+# automation-service mint its own M2M token to call agent/fleet-service, since
+# it has no human Clerk session to present the way command-interface does.
 variable "clerk_m2m_secret_key" {
   description = "Secret Key for the Clerk Machine representing automation-service, used to mint its outbound M2M token."
   type        = string
