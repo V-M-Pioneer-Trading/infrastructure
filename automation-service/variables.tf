@@ -5,7 +5,7 @@ variable "aws_region" {
 }
 
 variable "state_bucket" {
-  description = "S3 bucket that stores Terraform state, including personal/terraform.tfstate, navigation-service/terraform.tfstate, agent-service/terraform.tfstate and fleet-service/terraform.tfstate."
+  description = "S3 bucket that stores Terraform state, including personal/terraform.tfstate, navigation-service/terraform.tfstate, agent-service/terraform.tfstate, fleet-service/terraform.tfstate and auth-service/terraform.tfstate."
   type        = string
 }
 

@@ -42,6 +42,20 @@ data "terraform_remote_state" "fleet_service" {
   }
 }
 
+# auth-service publishes the introspection endpoint URL and the name of the
+# SSM parameter holding the caller secret (meta#80 step 3). Read, not
+# redeclared: the shared EC2 role is already allowed GetParameter on that
+# parameter by auth-service's own policy, so this stack needs no IAM for it.
+data "terraform_remote_state" "auth_service" {
+  backend = "s3"
+
+  config = {
+    bucket = var.state_bucket
+    key    = "auth-service/terraform.tfstate"
+    region = var.aws_region
+  }
+}
+
 # KMS resource-based matching needs the key ARN, not the alias ARN.
 data "aws_kms_alias" "ssm" {
   name = "alias/aws/ssm"
@@ -237,16 +251,84 @@ locals {
     "  fi",
     "fi",
     "systemctl enable --now docker",
-    "POSTGRES_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.postgres_password.name} --with-decryption --query Parameter.Value --output text)",
-    "AI_SERVICE_SECRET=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.ai_service_secret.name} --with-decryption --query Parameter.Value --output text)",
-    "CLERK_JWT_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_jwt_key.name} --with-decryption --query Parameter.Value --output text)",
-    "CLERK_M2M_SECRET_KEY=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.clerk_m2m_secret_key.name} --with-decryption --query Parameter.Value --output text)",
+    # Secret reads, all BEFORE any `docker rm -f`, and a failed or empty read
+    # aborts the script with the running containers untouched. From meta#80
+    # step 8 the image refuses to start without AUTH_INTROSPECTION_SECRET, so
+    # an unguarded `$(...)` that read back empty (the AWS CLI prints nothing
+    # on AccessDenied, and `None` for a parameter that resolves to nothing)
+    # would replace a healthy container with a crash-looping one. Same guard
+    # and retry as auth-service's bootstrap; the retry covers IAM propagation.
+    # No IAM change for the introspection secret: auth-service's own policy
+    # already grants the shared EC2 role GetParameter on it.
+    "read_secure_parameter() {",
+    "  _param_name=\"$1\"",
+    "  _param_value=\"\"",
+    "  _attempt=0",
+    "  while [ \"$_attempt\" -lt 12 ]; do",
+    "    _attempt=$((_attempt + 1))",
+    "    _param_value=$(aws ssm get-parameter --region ${var.aws_region} --name \"$_param_name\" --with-decryption --query Parameter.Value --output text 2>/dev/null || true)",
+    "    if [ -n \"$_param_value\" ] && [ \"$_param_value\" != None ]; then",
+    "      printf '%s' \"$_param_value\"",
+    "      return 0",
+    "    fi",
+    "    echo \"waiting for SSM parameter $_param_name to read back non-empty (attempt $_attempt/12)\" >&2",
+    "    sleep 5",
+    "  done",
+    "  echo \"FATAL: SSM parameter $_param_name read back empty after ~60s. Refusing to restart automation-service with an empty secret; the running containers are untouched.\" >&2",
+    "  return 1",
+    "}",
+    # CLERK_JWT_KEY/CLERK_ISSUER and AI_SERVICE_SECRET stay injected until
+    # step 10: an image from before step 8 still needs them, and redeploying
+    # the previous image tag is this service's rollback. The migrated image
+    # ignores them.
+    "POSTGRES_PASSWORD=$(read_secure_parameter ${aws_ssm_parameter.postgres_password.name}) || exit 1",
+    "AI_SERVICE_SECRET=$(read_secure_parameter ${aws_ssm_parameter.ai_service_secret.name}) || exit 1",
+    "CLERK_JWT_KEY=$(read_secure_parameter ${aws_ssm_parameter.clerk_jwt_key.name}) || exit 1",
+    "CLERK_M2M_SECRET_KEY=$(read_secure_parameter ${aws_ssm_parameter.clerk_m2m_secret_key.name}) || exit 1",
+    "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_introspection_secret_parameter_name}) || exit 1",
+    "[ -n \"$POSTGRES_PASSWORD\" ] || { echo 'FATAL: POSTGRES_PASSWORD is empty.' >&2; exit 1; }",
+    "[ -n \"$AI_SERVICE_SECRET\" ] || { echo 'FATAL: AI_SERVICE_SECRET is empty.' >&2; exit 1; }",
+    "[ -n \"$CLERK_JWT_KEY\" ] || { echo 'FATAL: CLERK_JWT_KEY is empty.' >&2; exit 1; }",
+    "[ -n \"$CLERK_M2M_SECRET_KEY\" ] || { echo 'FATAL: CLERK_M2M_SECRET_KEY is empty.' >&2; exit 1; }",
+    "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
     "docker rm -f automation-service-postgres >/dev/null 2>&1 || true",
     "docker run -d --name automation-service-postgres --restart unless-stopped --network host -v /data/automation-service-postgres/pgdata:/var/lib/postgresql/data -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=\"$POSTGRES_PASSWORD\" -e POSTGRES_DB=automation postgres:16-alpine",
     "for _ in $(seq 1 30); do docker exec automation-service-postgres pg_isready -U postgres >/dev/null 2>&1 && break; sleep 5; done",
+    # Image digest before and after the pull, as in auth-service's bootstrap:
+    # the tag is `:latest`, so the SSM command output is what says whether
+    # this run changed the image.
+    "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.automation_service_image} 2>/dev/null || true)",
+    "echo \"automation-service image digest before pull: $IMAGE_DIGEST_BEFORE\"",
     "docker pull ${var.automation_service_image}",
+    "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.automation_service_image} 2>/dev/null || true)",
+    "echo \"automation-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
     "docker rm -f automation-service >/dev/null 2>&1 || true",
-    "docker run -d --name automation-service --restart unless-stopped --network host -e PORT=${var.automation_service_port} -e DATABASE_URL=\"postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/automation\" -e NAVIGATION_SERVICE_URL=http://localhost:${data.terraform_remote_state.navigation_service.outputs.navigation_service_port}/api/navigation/v1 -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e FLEET_SERVICE_URL=http://localhost:${data.terraform_remote_state.fleet_service.outputs.fleet_service_port}/api/fleet/v1 -e MINING_SHIP_SYMBOL=${var.mining_ship_symbol} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AI_SERVICE_SECRET=\"$AI_SERVICE_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e CLERK_M2M_SECRET_KEY=\"$CLERK_M2M_SECRET_KEY\" ${var.automation_service_image}",
+    "docker run -d --name automation-service --restart unless-stopped --network host -e PORT=${var.automation_service_port} -e DATABASE_URL=\"postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/automation\" -e NAVIGATION_SERVICE_URL=http://localhost:${data.terraform_remote_state.navigation_service.outputs.navigation_service_port}/api/navigation/v1 -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e FLEET_SERVICE_URL=http://localhost:${data.terraform_remote_state.fleet_service.outputs.fleet_service_port}/api/fleet/v1 -e MINING_SHIP_SYMBOL=${var.mining_ship_symbol} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AI_SERVICE_SECRET=\"$AI_SERVICE_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e CLERK_M2M_SECRET_KEY=\"$CLERK_M2M_SECRET_KEY\" -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.automation_service_image}",
+    # `docker run -d` returning 0 only means the container was created. From
+    # meta#80 step 8 the image refuses to start on a missing or bad
+    # AUTH_INTROSPECTION_* value. With --restart unless-stopped such a
+    # container is restarted over and over, and Docker reports
+    # State.Running=true for most of that loop, so a running check passes a
+    # crash-looping container. Poll /api/automation/health for up to ~90 s
+    # instead, then a non-zero exit so the SSM command is reported as Failed
+    # rather than Success. Same check as fleet-service's bootstrap.
+    "AUTOMATION_HEALTHY=no",
+    "_attempt=0",
+    "while [ \"$_attempt\" -lt 30 ]; do",
+    "  _attempt=$((_attempt + 1))",
+    "  if curl -fs -o /dev/null --max-time 2 http://127.0.0.1:${var.automation_service_port}/api/automation/health; then",
+    "    AUTOMATION_HEALTHY=yes",
+    "    break",
+    "  fi",
+    "  sleep 3",
+    "done",
+    "if [ \"$AUTOMATION_HEALTHY\" != yes ]; then",
+    "  echo 'FATAL: automation-service did not answer GET /api/automation/health on 127.0.0.1:${var.automation_service_port} within ~90s of docker run. Container state, restart count and the last 50 log lines follow.' >&2",
+    "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} err={{.State.Error}}' automation-service >&2 2>/dev/null || echo 'no such container' >&2",
+    "  docker logs --tail 50 automation-service >&2 2>&1 || true",
+    "  exit 1",
+    "fi",
+    "echo \"automation-service is running on port ${var.automation_service_port}.\"",
   ]
 }
 
