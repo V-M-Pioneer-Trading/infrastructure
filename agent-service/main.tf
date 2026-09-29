@@ -304,7 +304,8 @@ locals {
     # restart loop. From meta#80 step 9 a missing or bad AUTH_INTROSPECTION_*
     # value makes st-gateway exit at startup, and with st-gateway down every
     # game call answers 502. Fail the SSM command here, before agent-service
-    # is touched, rather than report Success.
+    # is replaced (MySQL, which it depends on, was already restarted above),
+    # rather than report Success.
     "GATEWAY_HEALTHY=no",
     "_attempt=0",
     "while [ \"$_attempt\" -lt 30 ]; do",
@@ -373,7 +374,7 @@ resource "aws_ssm_document" "agent_service_bootstrap" {
 
   content = jsonencode({
     schemaVersion = "2.2"
-    description   = "Install Docker and run agent-service + its MySQL container on shared EC2 host."
+    description   = "Install Docker and run agent-service, its MySQL container and st-gateway on the shared EC2 host."
     mainSteps = [
       {
         action = "aws:runShellScript"
