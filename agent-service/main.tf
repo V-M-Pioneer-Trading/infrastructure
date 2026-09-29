@@ -215,8 +215,10 @@ locals {
     # refuses to start without AUTH_INTROSPECTION_SECRET, so an unguarded
     # `$(...)` that read back empty (the AWS CLI prints nothing on
     # AccessDenied, and `None` for a parameter that resolves to nothing) would
-    # replace a healthy container with a crash-looping one. The retry covers
-    # IAM propagation.
+    # replace a healthy container with a crash-looping one. From meta#80 step 9
+    # the same holds for st-gateway, and a crash-looping st-gateway is worse:
+    # it is the single egress to SpaceTraders, so every game call from every
+    # service answers 502 until it is fixed. The retry covers IAM propagation.
     "read_secure_parameter() {",
     "  _param_name=\"$1\"",
     "  _param_value=\"\"",
@@ -231,7 +233,7 @@ locals {
     "    echo \"waiting for SSM parameter $_param_name to read back non-empty (attempt $_attempt/12)\" >&2",
     "    sleep 5",
     "  done",
-    "  echo \"FATAL: SSM parameter $_param_name read back empty after ~60s. Refusing to restart agent-service with an empty secret; the running containers are untouched.\" >&2",
+    "  echo \"FATAL: SSM parameter $_param_name read back empty after ~60s. Refusing to restart agent-service and st-gateway with an empty secret; the running containers are untouched.\" >&2",
     "  return 1",
     "}",
     "MYSQL_ROOT_PASSWORD=$(aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.mysql_root_password.name} --with-decryption --query Parameter.Value --output text)",
@@ -242,12 +244,13 @@ locals {
     # granted GetParameter on it there, so no extra IAM is needed here — only
     # the name, read from that stack's output.
     "AUTH_SERVICE_SHARED_SECRET=$(aws ssm get-parameter --region ${var.aws_region} --name ${data.terraform_remote_state.auth_service.outputs.auth_service_shared_secret_parameter_name} --with-decryption --query Parameter.Value --output text)",
-    # agent-service's caller secret for auth-service's introspection route
-    # (meta#80 step 6). The parameter and its GetParameter grant belong to
-    # auth-service's stack (step 3); only the name is read here. Read BEFORE
-    # the first `docker rm -f` below, so a failed read aborts with MySQL,
-    # st-gateway and agent-service all still running. agent-service only:
-    # st-gateway's container is not given it (its step is meta#80 step 9).
+    # The caller secret for auth-service's introspection route, given to BOTH
+    # containers this stack runs: agent-service (meta#80 step 6) and
+    # st-gateway (step 9). One value, one read. The parameter and its
+    # GetParameter grant belong to auth-service's stack (step 3); only the
+    # name is read here. Read BEFORE the first `docker rm -f` below (MySQL's,
+    # which precedes st-gateway's and agent-service's), so a failed read
+    # aborts with MySQL, st-gateway and agent-service all still running.
     "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_introspection_secret_parameter_name}) || exit 1",
     "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
     "docker rm -f agent-service-mysql >/dev/null 2>&1 || true",
@@ -271,17 +274,54 @@ locals {
     # needed in any of those four services. auth-service and Caddy, both also
     # on authnet, reach it via bridge DNS (http://st-gateway:${var.gateway_port})
     # instead.
-    # AUTH_SERVICE_SHARED_SECRET and CLERK_JWT_KEY are both required at
-    # startup by st-gateway's config.ts — it refuses to boot without them
-    # rather than running with authentication silently off, so these must be
-    # in place before the injecting image is deployed. auth-service is reached
+    # AUTH_SERVICE_SHARED_SECRET is required at startup by st-gateway's
+    # config.ts — it refuses to boot without it rather than running with
+    # authentication silently off. CLERK_JWT_KEY was likewise required until
+    # meta#80 step 9; from step 9 the image verifies tokens through
+    # auth-service's introspection route instead and refuses to start without
+    # AUTH_INTROSPECTION_URL and AUTH_INTROSPECTION_SECRET. CLERK_JWT_KEY and
+    # CLERK_ISSUER stay injected until step 10: an image from before step 9
+    # still needs them, and redeploying the previous image tag is
+    # st-gateway's rollback. The migrated image ignores them.
+    # AUTH_INTROSPECTION_URL is the FULL endpoint URL, used verbatim, and is
+    # deliberately NOT the remote-state output auth_introspection_url: that
+    # value (http://localhost:<port>/auth/v1/introspect) is the host loopback
+    # the four --network host services use, and localhost inside this
+    # authnet container is the container itself. st-gateway builds it from
+    # the same auth_service_port output with bridge DNS instead; auth-service
+    # listens on that port inside its container and serves the introspection
+    # route on the same listener as the vault route. auth-service is reached
     # by bridge DNS: both containers are on authnet, so st-gateway addresses
     # it by container name — the same idiom st-gateway's own AUTH_SERVICE_URL
     # already uses, and unaffected by meta#80 step 3, which additionally
     # publishes auth-service on 127.0.0.1 for the four --network host
     # services. Bridge members use bridge DNS; host-network services use
     # loopback. Neither needs the other's address.
-    "docker run -d --name st-gateway --restart unless-stopped --network authnet --ip ${local.authnet_gateway_ip} -p 127.0.0.1:${var.gateway_port}:${var.gateway_port} -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 -e AUTH_SERVICE_URL=http://auth-service:${data.terraform_remote_state.auth_service.outputs.auth_service_port} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} ${var.gateway_image}",
+    "docker run -d --name st-gateway --restart unless-stopped --network authnet --ip ${local.authnet_gateway_ip} -p 127.0.0.1:${var.gateway_port}:${var.gateway_port} -e PORT=${var.gateway_port} -e SPACETRADERS_BASE_URL=https://api.spacetraders.io/v2 -e AUTH_SERVICE_URL=http://auth-service:${data.terraform_remote_state.auth_service.outputs.auth_service_port} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_INTROSPECTION_URL=http://auth-service:${data.terraform_remote_state.auth_service.outputs.auth_service_port}/auth/v1/introspect -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.gateway_image}",
+    # Same /health poll as agent-service's below, for the same reason:
+    # `docker run -d` returning 0 only means the container was created, and a
+    # crash-looping container reports State.Running=true for most of its
+    # restart loop. From meta#80 step 9 a missing or bad AUTH_INTROSPECTION_*
+    # value makes st-gateway exit at startup, and with st-gateway down every
+    # game call answers 502. Fail the SSM command here, before agent-service
+    # is touched, rather than report Success.
+    "GATEWAY_HEALTHY=no",
+    "_attempt=0",
+    "while [ \"$_attempt\" -lt 30 ]; do",
+    "  _attempt=$((_attempt + 1))",
+    "  if curl -fs -o /dev/null --max-time 2 http://127.0.0.1:${var.gateway_port}/health; then",
+    "    GATEWAY_HEALTHY=yes",
+    "    break",
+    "  fi",
+    "  sleep 3",
+    "done",
+    "if [ \"$GATEWAY_HEALTHY\" != yes ]; then",
+    "  echo 'FATAL: st-gateway did not answer GET /health on 127.0.0.1:${var.gateway_port} within ~90s of docker run. Every game call is failing with 502. Container state, restart count and the last 50 log lines follow.' >&2",
+    "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} err={{.State.Error}}' st-gateway >&2 2>/dev/null || echo 'no such container' >&2",
+    "  docker logs --tail 50 st-gateway >&2 2>&1 || true",
+    "  exit 1",
+    "fi",
+    "echo \"st-gateway is running on port ${var.gateway_port}.\"",
     # Image digest before and after the pull, as in fleet-service's and
     # auth-service's bootstraps: the tag is `:latest`, so the SSM command
     # output is what says whether this run changed the image.
