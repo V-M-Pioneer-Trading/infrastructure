@@ -83,8 +83,8 @@ in [#23](https://github.com/V-M-Pioneer-Trading/infrastructure/issues/23).
 Decision 22 ([meta#59](https://github.com/V-M-Pioneer-Trading/meta/issues/59),
 2026-09-30): auth-service mints every machine token, so it alone holds Clerk
 Machine Secret Keys. Each caller instead holds a caller secret and sends it to
-`POST /auth/v1/m2m-token`. The rollout is additive: automation-service keeps its
-own Clerk key (`automation-service-clerk-m2m-secret-key`) until meta#59 step 3.
+`POST /auth/v1/m2m-token`. automation-service no longer holds a Clerk key
+(dropped in meta#59 step 3).
 
 | SSM parameter (SecureString) | Written by | Read by |
 |---|---|---|
@@ -96,10 +96,8 @@ own Clerk key (`automation-service-clerk-m2m-secret-key`) until meta#59 step 3.
 | `auth-service-m2m-caller-secret-automation-service` | Terraform (`random_password`) | auth-service, automation-service |
 | `auth-service-m2m-caller-secret-ai-service` | Terraform (`random_password`) | auth-service (ai-service later) |
 
-`automation-service-clerk-m2m-secret-key` (`var.clerk_m2m_secret_key`) stays in
-the automation-service stack for now and is removed in meta#59 step 3.
-
-Operator steps, in order:
+Initial rollout (additive; historical once step 3 below is applied, since the
+SSM parameter it copies from is gone), in order:
 
 1. Deploy the auth-service image that has the `/auth/v1/m2m-token` endpoint
    first (auth-service PR, number to follow).
@@ -125,11 +123,26 @@ Operator steps, in order:
    remote state. It is safe at this point: the old key is still passed, and the
    new `AUTH_M2M_*` variables are simply unused until the image is migrated.
 
-Rotation of the `automation-service` Machine key is NOT part of this change. It
-happens in meta#59 rollout step 3, after automation-service is migrated, together
-with dropping `automation-service-clerk-m2m-secret-key` from its stack. Dropping
-it destroys the parameter and its version history, so the old value must be
-rotated at that point; then re-apply auth-service with the new key.
+Step 3 of the rollout (meta#59, drops `automation-service-clerk-m2m-secret-key`
+and `var.clerk_m2m_secret_key` from the automation-service stack), in order:
+
+1. Confirm [automation-service#32](https://github.com/V-M-Pioneer-Trading/automation-service/pull/32)
+   is deployed and the shadow run passed.
+2. Apply `automation-service/`. This destroys the
+   `automation-service-clerk-m2m-secret-key` parameter and its version history,
+   and the bootstrap restarts automation-service and its Postgres container.
+3. In Clerk, rotate the `automation-service` Machine key. Then re-apply
+   `auth-service/` with the new key (the `ai-service` key is also required, no
+   default), both set with `read -s`:
+
+   ```bash
+   read -s TF_VAR_m2m_machine_key_automation_service; export TF_VAR_m2m_machine_key_automation_service
+   read -s TF_VAR_m2m_machine_key_ai_service; export TF_VAR_m2m_machine_key_ai_service
+   terraform -chdir=auth-service apply
+   ```
+
+   auth-service restarts with the new key. The old value remains in older
+   versions of the S3-versioned state; rotation makes it harmless.
 
 ## Local commands
 
