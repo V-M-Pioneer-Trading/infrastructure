@@ -60,6 +60,53 @@ resource "aws_ssm_parameter" "clerk_jwt_key" {
   value = var.clerk_jwt_key
 }
 
+# meta#59 / auth-design.md decision 22 (2026-09-30): auth-service mints every
+# machine token, so it alone holds the Clerk Machine Secret Keys - one Clerk
+# Machine per caller, so a token's `sub` still names the caller and one Machine
+# can be revoked alone. Same shape as clerk_jwt_key above: Clerk mints these,
+# not Terraform, so the variable has no default (variables.tf) and the value
+# is supplied at apply time.
+resource "aws_ssm_parameter" "auth_m2m_machine_key_automation_service" {
+  name  = "auth-service-m2m-machine-key-automation-service"
+  type  = "SecureString"
+  value = var.m2m_machine_key_automation_service
+}
+
+resource "aws_ssm_parameter" "auth_m2m_machine_key_ai_service" {
+  name  = "auth-service-m2m-machine-key-ai-service"
+  type  = "SecureString"
+  value = var.m2m_machine_key_ai_service
+}
+
+# Decision 22: a caller proves who it is to POST /auth/v1/m2m-token with its OWN
+# secret, so the secret alone identifies the caller. One independent
+# random_password per caller, each distinct from the vault and introspection
+# secrets by construction: sharing any of them would let every verifier mint,
+# or let one caller mint as another. auth-service refuses to start if any two
+# of these secrets are equal. Generated like auth_introspection_secret: only
+# auth-service and the one caller need to agree, so Terraform can mint it.
+resource "random_password" "auth_m2m_caller_secret_automation_service" {
+  length  = 32
+  special = false
+}
+
+resource "aws_ssm_parameter" "auth_m2m_caller_secret_automation_service" {
+  name  = "auth-service-m2m-caller-secret-automation-service"
+  type  = "SecureString"
+  value = random_password.auth_m2m_caller_secret_automation_service.result
+}
+
+resource "random_password" "auth_m2m_caller_secret_ai_service" {
+  length  = 32
+  special = false
+}
+
+resource "aws_ssm_parameter" "auth_m2m_caller_secret_ai_service" {
+  name  = "auth-service-m2m-caller-secret-ai-service"
+  type  = "SecureString"
+  value = random_password.auth_m2m_caller_secret_ai_service.result
+}
+
 # Lets the shared host's bootstrap script read these SecureString parameters
 # at container-start time, same pattern as every sibling service.
 resource "aws_iam_role_policy" "shared_ec2_auth_service_ssm_parameters" {
@@ -76,6 +123,14 @@ resource "aws_iam_role_policy" "shared_ec2_auth_service_ssm_parameters" {
           aws_ssm_parameter.auth_service_shared_secret.arn,
           aws_ssm_parameter.auth_introspection_secret.arn,
           aws_ssm_parameter.clerk_jwt_key.arn,
+          aws_ssm_parameter.auth_m2m_machine_key_automation_service.arn,
+          aws_ssm_parameter.auth_m2m_machine_key_ai_service.arn,
+          # Caller secrets: the shared EC2 role reads these by name from the
+          # caller's own bootstrap (automation-service today, ai-service
+          # later), so that stack needs no IAM of its own for it - the same
+          # arrangement as the introspection secret above.
+          aws_ssm_parameter.auth_m2m_caller_secret_automation_service.arn,
+          aws_ssm_parameter.auth_m2m_caller_secret_ai_service.arn,
         ]
       },
       {
@@ -346,10 +401,19 @@ locals {
     "AUTH_SERVICE_SHARED_SECRET=$(read_secure_parameter ${aws_ssm_parameter.auth_service_shared_secret.name}) || exit 1",
     "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${aws_ssm_parameter.auth_introspection_secret.name}) || exit 1",
     "CLERK_JWT_KEY=$(read_secure_parameter ${aws_ssm_parameter.clerk_jwt_key.name}) || exit 1",
+    # decision 22 / meta#59: four more reads, same guard, still before `docker rm -f`.
+    "M2M_MACHINE_KEY_AUTOMATION_SERVICE=$(read_secure_parameter ${aws_ssm_parameter.auth_m2m_machine_key_automation_service.name}) || exit 1",
+    "M2M_MACHINE_KEY_AI_SERVICE=$(read_secure_parameter ${aws_ssm_parameter.auth_m2m_machine_key_ai_service.name}) || exit 1",
+    "M2M_CALLER_SECRET_AUTOMATION_SERVICE=$(read_secure_parameter ${aws_ssm_parameter.auth_m2m_caller_secret_automation_service.name}) || exit 1",
+    "M2M_CALLER_SECRET_AI_SERVICE=$(read_secure_parameter ${aws_ssm_parameter.auth_m2m_caller_secret_ai_service.name}) || exit 1",
     "[ -n \"$AUTH_SERVICE_SHARED_SECRET\" ] || { echo 'FATAL: AUTH_SERVICE_SHARED_SECRET is empty.' >&2; exit 1; }",
     "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
     "[ -n \"$CLERK_JWT_KEY\" ] || { echo 'FATAL: CLERK_JWT_KEY is empty.' >&2; exit 1; }",
-    "echo 'all three parameters read back non-empty.'",
+    "[ -n \"$M2M_MACHINE_KEY_AUTOMATION_SERVICE\" ] || { echo 'FATAL: M2M_MACHINE_KEY_AUTOMATION_SERVICE is empty.' >&2; exit 1; }",
+    "[ -n \"$M2M_MACHINE_KEY_AI_SERVICE\" ] || { echo 'FATAL: M2M_MACHINE_KEY_AI_SERVICE is empty.' >&2; exit 1; }",
+    "[ -n \"$M2M_CALLER_SECRET_AUTOMATION_SERVICE\" ] || { echo 'FATAL: M2M_CALLER_SECRET_AUTOMATION_SERVICE is empty.' >&2; exit 1; }",
+    "[ -n \"$M2M_CALLER_SECRET_AI_SERVICE\" ] || { echo 'FATAL: M2M_CALLER_SECRET_AI_SERVICE is empty.' >&2; exit 1; }",
+    "echo 'all seven parameters read back non-empty.'",
     # ------------------------------------------------------------------
     # The loopback port must be free, or free because WE hold it. Checked
     # BEFORE `docker rm -f`: from this apply onward the `docker run` below
@@ -425,7 +489,7 @@ locals {
     # is observed rather than assumed.
     #
     # The SQLite data volume mount is unchanged.
-    "docker run -d --name auth-service --restart unless-stopped --network authnet --ip ${local.authnet_auth_service_ip} -p 127.0.0.1:${var.auth_service_port}:${var.auth_service_port} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.auth_service_image}",
+    "docker run -d --name auth-service --restart unless-stopped --network authnet --ip ${local.authnet_auth_service_ip} -p 127.0.0.1:${var.auth_service_port}:${var.auth_service_port} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" -e M2M_MACHINE_KEY_AUTOMATION_SERVICE=\"$M2M_MACHINE_KEY_AUTOMATION_SERVICE\" -e M2M_MACHINE_KEY_AI_SERVICE=\"$M2M_MACHINE_KEY_AI_SERVICE\" -e M2M_CALLER_SECRET_AUTOMATION_SERVICE=\"$M2M_CALLER_SECRET_AUTOMATION_SERVICE\" -e M2M_CALLER_SECRET_AI_SERVICE=\"$M2M_CALLER_SECRET_AI_SERVICE\" ${var.auth_service_image}",
     # `docker run -d` returning 0 only means the container was created. A bind
     # failure on 127.0.0.1:${var.auth_service_port}, or a config the service
     # refuses to start with, leaves the vault DOWN. With --restart

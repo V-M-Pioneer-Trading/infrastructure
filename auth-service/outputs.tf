@@ -37,3 +37,27 @@ output "auth_introspection_url" {
   description = "AUTH_INTROSPECTION_URL for the four --network host services (fleet, automation, navigation, agent), via the loopback-published port. This is the FULL endpoint URL including the /auth/v1/introspect path; clients use it verbatim and never append a path. st-gateway is on authnet and keeps using bridge DNS (http://auth-service:<port>/auth/v1/introspect), like its existing AUTH_SERVICE_URL."
   value       = "http://localhost:${var.auth_service_port}/auth/v1/introspect"
 }
+
+# meta#59 / auth-design.md decision 22 (2026-09-30). Full endpoint URL, path
+# included, used verbatim - same rule as auth_introspection_url above. Same
+# listener, same loopback publish, so the existing OUTPUT-chain rule already
+# lets the --network host callers reach it; no firewall change.
+output "auth_m2m_token_url" {
+  description = "AUTH_M2M_TOKEN_URL for headless callers (automation-service now, ai-service later): the FULL /auth/v1/m2m-token endpoint URL via the loopback-published port. Clients use it verbatim."
+  value       = "http://localhost:${var.auth_service_port}/auth/v1/m2m-token"
+}
+
+# Published for the same reason, and read the same way, as
+# auth_introspection_secret_parameter_name: automation-service's bootstrap
+# reads this parameter by name, and the shared EC2 role is already granted
+# GetParameter on it by the policy in main.tf. Apply auth-service BEFORE
+# automation-service: the consumer reads this output from remote state.
+output "auth_m2m_caller_secret_automation_service_parameter_name" {
+  description = "SSM parameter holding automation-service's caller secret, sent as X-M2M-Caller-Secret to POST /auth/v1/m2m-token. Distinct from every other auth-service secret by construction; hand it to automation-service's stack only."
+  value       = aws_ssm_parameter.auth_m2m_caller_secret_automation_service.name
+}
+
+output "auth_m2m_caller_secret_ai_service_parameter_name" {
+  description = "SSM parameter holding ai-service's caller secret, sent as X-M2M-Caller-Secret to POST /auth/v1/m2m-token. Hand it to ai-service's stack only (meta#59, not wired yet)."
+  value       = aws_ssm_parameter.auth_m2m_caller_secret_ai_service.name
+}

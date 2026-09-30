@@ -61,3 +61,19 @@ variable "clerk_issuer" {
   type        = string
   default     = "https://uncommon-crayfish-6401.clerk.accounts.dev"
 }
+
+# No defaults: Clerk Machine Secret Keys (auth-design.md decision 22, meta#59,
+# 2026-09-30). Only Clerk mints them - genuine bearer credentials, so Max
+# supplies them at apply time. One Machine per caller keeps a token's `sub`
+# naming the caller and lets one Machine be revoked alone.
+variable "m2m_machine_key_automation_service" {
+  description = "Secret Key of the Clerk Machine `automation-service`, used by auth-service to mint that caller's M2M token."
+  type        = string
+  sensitive   = true
+}
+
+variable "m2m_machine_key_ai_service" {
+  description = "Secret Key of the Clerk Machine `ai-service`, used by auth-service to mint that caller's M2M token."
+  type        = string
+  sensitive   = true
+}
