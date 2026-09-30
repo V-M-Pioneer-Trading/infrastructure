@@ -103,19 +103,18 @@ Operator steps, in order:
 
 1. Deploy the auth-service image that has the `/auth/v1/m2m-token` endpoint
    first (auth-service PR, number to follow).
-2. In Clerk, create the `ai-service` Machine. COPY the current
-   `automation-service` Machine key (the value of
-   `automation-service-clerk-m2m-secret-key`) for
-   `auth-service-m2m-machine-key-automation-service`. Do not rotate it yet: the
-   running automation-service still mints with it.
+2. In Clerk, create the `ai-service` Machine. The `automation-service` Machine
+   key is COPIED from `automation-service-clerk-m2m-secret-key` by the first
+   line below, straight from SSM into the environment, so it is never printed.
+   Do not rotate it yet: the running automation-service still mints with it.
 3. Apply `auth-service/` with both machine keys supplied through the
    environment, set with `read -s` so they never appear on a command line or in
    shell history:
 
    ```bash
-   read -s TF_VAR_m2m_machine_key_automation_service; export TF_VAR_m2m_machine_key_automation_service
+   export TF_VAR_m2m_machine_key_automation_service=$(aws ssm get-parameter --with-decryption --name automation-service-clerk-m2m-secret-key --query Parameter.Value --output text)
    read -s TF_VAR_m2m_machine_key_ai_service; export TF_VAR_m2m_machine_key_ai_service
-   terraform -chdir=auth-service apply
+   terraform -chdir=auth-service apply   # clerk_jwt_key, state_bucket, ec2_instance_id via your usual TF_VARs or plan script
    ```
 
    Never pass them with `-var`. This creates the four parameters and restarts
