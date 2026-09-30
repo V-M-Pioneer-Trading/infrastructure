@@ -53,11 +53,11 @@ output "auth_m2m_token_url" {
 # GetParameter on it by the policy in main.tf. Apply auth-service BEFORE
 # automation-service: the consumer reads this output from remote state.
 output "auth_m2m_caller_secret_automation_service_parameter_name" {
-  description = "SSM parameter holding automation-service's caller secret, sent as X-Service-Secret to POST /auth/v1/m2m-token. Distinct from every other auth-service secret by construction; hand it to automation-service's stack only."
+  description = "SSM parameter holding automation-service's caller secret, sent as X-M2M-Caller-Secret to POST /auth/v1/m2m-token. Distinct from every other auth-service secret by construction; hand it to automation-service's stack only."
   value       = aws_ssm_parameter.auth_m2m_caller_secret_automation_service.name
 }
 
 output "auth_m2m_caller_secret_ai_service_parameter_name" {
-  description = "SSM parameter holding ai-service's caller secret, sent as X-Service-Secret to POST /auth/v1/m2m-token. Hand it to ai-service's stack only (meta#59, not wired yet)."
+  description = "SSM parameter holding ai-service's caller secret, sent as X-M2M-Caller-Secret to POST /auth/v1/m2m-token. Hand it to ai-service's stack only (meta#59, not wired yet)."
   value       = aws_ssm_parameter.auth_m2m_caller_secret_ai_service.name
 }
