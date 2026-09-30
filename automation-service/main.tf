@@ -43,7 +43,9 @@ data "terraform_remote_state" "fleet_service" {
 }
 
 # auth-service publishes the introspection endpoint URL and the name of the
-# SSM parameter holding the caller secret (meta#80 step 3). Read, not
+# SSM parameter holding the caller secret (meta#80 step 3); from meta#59
+# (decision 22) also the M2M token URL and the name of this caller's own
+# secret parameter. Read, not
 # redeclared: the shared EC2 role is already allowed GetParameter on that
 # parameter by auth-service's own policy, so this stack needs no IAM for it.
 data "terraform_remote_state" "auth_service" {
@@ -72,16 +74,6 @@ resource "aws_ssm_parameter" "postgres_password" {
   value = random_password.postgres.result
 }
 
-# auth-design.md decision 19: this service is itself a caller of agent/fleet
-# -service, so it also needs a credential to *sign* an outbound Authorization
-# with — a dedicated Clerk Machine's Secret Key. No default (see variables.tf)
-# — Clerk mints this, not Terraform.
-resource "aws_ssm_parameter" "clerk_m2m_secret_key" {
-  name  = "automation-service-clerk-m2m-secret-key"
-  type  = "SecureString"
-  value = var.clerk_m2m_secret_key
-}
-
 # Lets the shared host's bootstrap script read this SecureString parameter at
 # container-start time, mirroring agent-service's MySQL password pattern.
 resource "aws_iam_role_policy" "shared_ec2_automation_service_ssm_parameters" {
@@ -96,7 +88,6 @@ resource "aws_iam_role_policy" "shared_ec2_automation_service_ssm_parameters" {
         Action = "ssm:GetParameter"
         Resource = [
           aws_ssm_parameter.postgres_password.arn,
-          aws_ssm_parameter.clerk_m2m_secret_key.arn,
         ]
       },
       {
@@ -256,11 +247,15 @@ locals {
     "  return 1",
     "}",
     "POSTGRES_PASSWORD=$(read_secure_parameter ${aws_ssm_parameter.postgres_password.name}) || exit 1",
-    "CLERK_M2M_SECRET_KEY=$(read_secure_parameter ${aws_ssm_parameter.clerk_m2m_secret_key.name}) || exit 1",
     "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_introspection_secret_parameter_name}) || exit 1",
+    # meta#59 / decision 22 (2026-09-30): automation-service no longer holds a
+    # Clerk key. It presents this caller secret to auth-service, which mints
+    # its M2M token. Read by name from auth-service's remote state; that
+    # stack's policy already grants the read. Requires auth-service applied first.
+    "AUTH_M2M_CALLER_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_m2m_caller_secret_automation_service_parameter_name}) || exit 1",
     "[ -n \"$POSTGRES_PASSWORD\" ] || { echo 'FATAL: POSTGRES_PASSWORD is empty.' >&2; exit 1; }",
-    "[ -n \"$CLERK_M2M_SECRET_KEY\" ] || { echo 'FATAL: CLERK_M2M_SECRET_KEY is empty.' >&2; exit 1; }",
     "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
+    "[ -n \"$AUTH_M2M_CALLER_SECRET\" ] || { echo 'FATAL: AUTH_M2M_CALLER_SECRET is empty.' >&2; exit 1; }",
     "docker rm -f automation-service-postgres >/dev/null 2>&1 || true",
     "docker run -d --name automation-service-postgres --restart unless-stopped --network host -v /data/automation-service-postgres/pgdata:/var/lib/postgresql/data -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=\"$POSTGRES_PASSWORD\" -e POSTGRES_DB=automation postgres:16-alpine",
     "for _ in $(seq 1 30); do docker exec automation-service-postgres pg_isready -U postgres >/dev/null 2>&1 && break; sleep 5; done",
@@ -275,7 +270,7 @@ locals {
     "docker rm -f automation-service >/dev/null 2>&1 || true",
     # Token verification is auth-service's (decision 21, meta#80); this service
     # holds no Clerk verification key.
-    "docker run -d --name automation-service --restart unless-stopped --network host -e PORT=${var.automation_service_port} -e DATABASE_URL=\"postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/automation\" -e NAVIGATION_SERVICE_URL=http://localhost:${data.terraform_remote_state.navigation_service.outputs.navigation_service_port}/api/navigation/v1 -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e FLEET_SERVICE_URL=http://localhost:${data.terraform_remote_state.fleet_service.outputs.fleet_service_port}/api/fleet/v1 -e MINING_SHIP_SYMBOL=${var.mining_ship_symbol} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_M2M_SECRET_KEY=\"$CLERK_M2M_SECRET_KEY\" -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.automation_service_image}",
+    "docker run -d --name automation-service --restart unless-stopped --network host -e PORT=${var.automation_service_port} -e DATABASE_URL=\"postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/automation\" -e NAVIGATION_SERVICE_URL=http://localhost:${data.terraform_remote_state.navigation_service.outputs.navigation_service_port}/api/navigation/v1 -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e FLEET_SERVICE_URL=http://localhost:${data.terraform_remote_state.fleet_service.outputs.fleet_service_port}/api/fleet/v1 -e MINING_SHIP_SYMBOL=${var.mining_ship_symbol} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" -e AUTH_M2M_TOKEN_URL=${data.terraform_remote_state.auth_service.outputs.auth_m2m_token_url} -e AUTH_M2M_CALLER_SECRET=\"$AUTH_M2M_CALLER_SECRET\" ${var.automation_service_image}",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 8 the image refuses to start on a missing or bad
     # AUTH_INTROSPECTION_* value. With --restart unless-stopped such a
