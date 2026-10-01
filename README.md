@@ -110,6 +110,8 @@ SSM parameter it copies from is gone), in order:
    shell history:
 
    ```bash
+   # PRE-STEP-3 ONLY: this parameter is destroyed by step 3. After it, use the
+   # step 3 procedure below instead.
    export TF_VAR_m2m_machine_key_automation_service=$(aws ssm get-parameter --with-decryption --name automation-service-clerk-m2m-secret-key --query Parameter.Value --output text)
    read -s TF_VAR_m2m_machine_key_ai_service; export TF_VAR_m2m_machine_key_ai_service
    terraform -chdir=auth-service apply   # clerk_jwt_key, state_bucket, ec2_instance_id via your usual TF_VARs or plan script
@@ -123,26 +125,99 @@ SSM parameter it copies from is gone), in order:
    remote state. It is safe at this point: the old key is still passed, and the
    new `AUTH_M2M_*` variables are simply unused until the image is migrated.
 
-Step 3 of the rollout (meta#59, drops `automation-service-clerk-m2m-secret-key`
-and `var.clerk_m2m_secret_key` from the automation-service stack), in order:
+Step 3 of the rollout (meta#59) drops `automation-service-clerk-m2m-secret-key`
+and `var.clerk_m2m_secret_key` from the automation-service stack and rotates the
+automation-service Machine key. Set `INSTANCE_ID` (the `ec2_instance_id`) and
+`AUTH_PORT` (`auth_service_port`) in your shell first. Do the steps in order.
 
 1. Confirm [automation-service#32](https://github.com/V-M-Pioneer-Trading/automation-service/pull/32)
-   is deployed and the shadow run passed.
-2. Apply `automation-service/`. This destroys the
-   `automation-service-clerk-m2m-secret-key` parameter and its version history,
-   and the bootstrap restarts automation-service and its Postgres container.
-3. In Clerk, rotate the `automation-service` Machine key. Then re-apply
-   `auth-service/` with the new key (the `ai-service` key is also required, no
-   default), both set with `read -s`:
+   is deployed and the shadow run passed. Do not apply while an
+   automation-service CI deploy is in flight: CI re-runs the same bootstrap
+   document, and two runs would race on the containers. Before step 3, mint once
+   from the host (the command under "Verify" below) and note the `sub`.
+2. Apply `automation-service/`, saving the plan first:
 
    ```bash
-   read -s TF_VAR_m2m_machine_key_automation_service; export TF_VAR_m2m_machine_key_automation_service
-   read -s TF_VAR_m2m_machine_key_ai_service; export TF_VAR_m2m_machine_key_ai_service
-   terraform -chdir=auth-service apply
+   terraform -chdir=automation-service plan -out=tfplan
+   terraform -chdir=automation-service apply tfplan
    ```
 
-   auth-service restarts with the new key. The old value remains in older
-   versions of the S3-versioned state; rotation makes it harmless.
+   The plan must say **0 to add, 2 to change, 1 to destroy**: the destroy is
+   `aws_ssm_parameter.clerk_m2m_secret_key` and its version history; the changes
+   are `aws_iam_role_policy.shared_ec2_automation_service_ssm_parameters` (one
+   ARN fewer) and `aws_ssm_document.automation_service_bootstrap` (new script).
+   The new document version makes the association re-run the bootstrap, which
+   restarts automation-service and its Postgres container. After the apply:
+   - The association shows Success:
+     `aws ssm describe-instance-associations-status --region eu-central-1 --instance-id "$INSTANCE_ID"`.
+   - `docker logs automation-service` on the host shows a successful startup
+     token fetch from auth-service and no `m2m-token` errors.
+   - Check the autopilot status. It is held in memory only, so the restart
+     returns it to disarmed; re-arm it if it was armed.
+3. Rotate the key. Rotating in Clerk revokes the old key at once, while
+   auth-service still holds it in its environment, so keep the gap short. No M2M
+   outage follows: automation-service's cached JWT stays valid offline until its
+   refresh point, and the restart in (c) lands well before that.
+
+   a. In Clerk, rotate the `automation-service` Machine key and copy the new
+      value.
+   b. Plan `auth-service/`. `clerk_jwt_key` and the ai-service Machine key are
+      unchanged, so read them from SSM rather than retyping them; only the NEW
+      automation-service key is entered, with `read -s`:
+
+      ```bash
+      export TF_VAR_clerk_jwt_key=$(aws ssm get-parameter --region eu-central-1 --with-decryption --name auth-service-clerk-jwt-key --query Parameter.Value --output text)
+      export TF_VAR_m2m_machine_key_ai_service=$(aws ssm get-parameter --region eu-central-1 --with-decryption --name auth-service-m2m-machine-key-ai-service --query Parameter.Value --output text)
+      read -s TF_VAR_m2m_machine_key_automation_service; export TF_VAR_m2m_machine_key_automation_service
+      terraform -chdir=auth-service plan -out=tfplan   # plus state_bucket, ec2_instance_id via your usual TF_VARs
+      ```
+
+      The plan must be **0 to add, 1 to change, 0 to destroy**, the one change
+      being `aws_ssm_parameter.auth_m2m_machine_key_automation_service` in place.
+      Anything else: stop. Never paste the same key for both callers:
+      auth-service refuses to start if the two Machine keys are equal.
+   c. `terraform -chdir=auth-service apply tfplan`. This changes only the SSM
+      parameter. The bootstrap references parameter names, not values, so
+      nothing restarts and auth-service keeps the revoked key in its
+      environment until the bootstrap runs again (it would fail at its next
+      refresh and go dark when the cached token expires). Re-run the bootstrap
+      the way auth-service CI does, and wait for Success:
+
+      ```bash
+      DOCUMENT="auth-service-bootstrap-$INSTANCE_ID"
+      command_id=$(aws ssm send-command --region eu-central-1 \
+        --document-name "$DOCUMENT" \
+        --targets "Key=InstanceIds,Values=$INSTANCE_ID" \
+        --timeout-seconds 600 \
+        --query Command.CommandId --output text)
+      until [ "$(aws ssm get-command-invocation --region eu-central-1 --command-id "$command_id" --instance-id "$INSTANCE_ID" --query Status --output text 2>/dev/null)" = Success ]; do sleep 10; done
+      ```
+
+      The loop never ends on Failed or TimedOut: interrupt it and read the
+      command output in the SSM console.
+   d. Verify, on the host:
+
+      ```bash
+      docker inspect -f '{{.State.StartedAt}}' auth-service   # later than the apply in (c)
+      curl -s -o /tmp/mint -w '%{http_code}\n' -X POST "localhost:$AUTH_PORT/auth/v1/m2m-token" \
+        -H "X-M2M-Caller-Secret: $(aws ssm get-parameter --region eu-central-1 --with-decryption --name auth-service-m2m-caller-secret-automation-service --query Parameter.Value --output text)"
+      jq -r .token /tmp/mint | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq '{sub, iat}'; rm /tmp/mint
+      ```
+
+      Expect 200, the same `sub` as the one noted in step 1, and an `iat` after
+      the rotation (the restart emptied auth-service's token cache, so this is a
+      real mint with the new key).
+
+   The old key value remains in older versions of the S3-versioned state;
+   rotation makes it harmless.
+
+Rollback. After this PR is applied, reverting automation-service#32 crash-loops:
+the old image needs `CLERK_M2M_SECRET_KEY`, which this stack no longer provides.
+Revert this PR first and re-apply `automation-service/` with
+`TF_VAR_clerk_m2m_secret_key` sourced from
+`auth-service-m2m-machine-key-automation-service`, then revert #32. The Clerk
+rotation in step 3 is the point of no return for the old key: once rotated, the
+old value is dead everywhere, and only the parameter above holds a working key.
 
 ## Local commands
 

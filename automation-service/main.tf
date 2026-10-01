@@ -249,8 +249,9 @@ locals {
     "POSTGRES_PASSWORD=$(read_secure_parameter ${aws_ssm_parameter.postgres_password.name}) || exit 1",
     "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_introspection_secret_parameter_name}) || exit 1",
     # meta#59 / decision 22 (2026-09-30): automation-service holds no Clerk key;
-    # it presents this caller secret to auth-service, which mints its M2M token. Read by name from auth-service's remote state; that
-    # stack's policy already grants the read. Requires auth-service applied first.
+    # it presents this caller secret to auth-service, which mints its M2M
+    # token. Read by name from auth-service's remote state; that stack's policy
+    # already grants the read. Requires auth-service applied first.
     "AUTH_M2M_CALLER_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_m2m_caller_secret_automation_service_parameter_name}) || exit 1",
     "[ -n \"$POSTGRES_PASSWORD\" ] || { echo 'FATAL: POSTGRES_PASSWORD is empty.' >&2; exit 1; }",
     "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
