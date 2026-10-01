@@ -44,13 +44,3 @@ variable "mining_ship_symbol" {
   description = "SpaceTraders ship symbol automation-service's mining autopilot drives."
   type        = string
 }
-
-# No default: a real Clerk Machine's Secret Key (auth-design.md decision
-# 19), which only Clerk mints — a genuine bearer credential. Lets
-# automation-service mint its own M2M token to call agent/fleet-service, since
-# it has no human Clerk session to present the way command-interface does.
-variable "clerk_m2m_secret_key" {
-  description = "Secret Key for the Clerk Machine representing automation-service, used to mint its outbound M2M token."
-  type        = string
-  sensitive   = true
-}
