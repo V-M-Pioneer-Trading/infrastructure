@@ -199,9 +199,12 @@ automation-service Machine key. Set `INSTANCE_ID` (the `ec2_instance_id`) and
 
       ```bash
       docker inspect -f '{{.State.StartedAt}}' auth-service   # later than the apply in (c)
-      curl -s -o /tmp/mint -w '%{http_code}\n' -X POST "localhost:$AUTH_PORT/auth/v1/m2m-token" \
-        -H "X-M2M-Caller-Secret: $(aws ssm get-parameter --region eu-central-1 --with-decryption --name auth-service-m2m-caller-secret-automation-service --query Parameter.Value --output text)"
-      jq -r .token /tmp/mint | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq '{sub, iat}'; rm /tmp/mint
+      M=$(umask 077; mktemp)
+      S=$(aws ssm get-parameter --region eu-central-1 --with-decryption --name auth-service-m2m-caller-secret-automation-service --query Parameter.Value --output text)
+      # 3005 is auth_service_port; this runs on the host, not in your workstation shell.
+      curl -s -o "$M" -w '%{http_code}\n' -X POST localhost:3005/auth/v1/m2m-token -H "X-M2M-Caller-Secret: $S"
+      sed -E 's/.*"token":"([^"]+)".*/\1/' "$M" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | grep -o '"sub":"[^"]*"\|"iat":[0-9]*'
+      rm -f "$M"; unset S M
       ```
 
       Expect 200, the same `sub` as the one noted in step 1, and an `iat` after
