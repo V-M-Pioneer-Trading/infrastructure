@@ -167,7 +167,7 @@ locals {
 
   # agent_service_image with its tag stripped, so the SSM document's imageTag parameter can
   # select another tag of the same repository (rollback by sha).
-  agent_service_image_repo = try(regex("^(.*):[^:/]+$", var.agent_service_image)[0], var.agent_service_image)
+  agent_service_image_repo = try(regex("^([^@]*?)(?::[^:/@]+)?(?:@.+)?$", var.agent_service_image)[0], var.agent_service_image)
 
   agent_service_bootstrap_commands = [
     "set -euo pipefail",
@@ -329,6 +329,9 @@ locals {
     "case \"$IMAGE_TAG\" in latest|sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) echo 'FATAL: imageTag must be latest or sha-<40 hex>.' >&2; exit 1 ;; esac",
     "if [ \"$IMAGE_TAG\" = latest ]; then IMAGE_REF='${var.agent_service_image}'; else IMAGE_REF='${local.agent_service_image_repo}':\"$IMAGE_TAG\"; fi",
     "echo \"agent-service image: $IMAGE_REF\"",
+    "if [ \"$IMAGE_TAG\" != latest ]; then",
+    "  echo 'NOTE: pinned to '\"$IMAGE_TAG\"'; the container is replaced regardless of the digest comparison below.'",
+    "fi",
     "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' \"$IMAGE_REF\" 2>/dev/null || true)",
     "echo \"agent-service image digest before pull: $IMAGE_DIGEST_BEFORE\"",
     "docker pull \"$IMAGE_REF\"",
@@ -377,6 +380,9 @@ resource "aws_ssm_document" "agent_service_bootstrap" {
   content = jsonencode({
     schemaVersion = "2.2"
     description   = "Install Docker and run agent-service, its MySQL container and st-gateway on the shared EC2 host."
+    # SSM rejects any bare `{{ word }}` that is not a declared parameter (e.g.
+    # `{{end}}`, `{{else}}`); docker --format templates in the script must contain
+    # a dot or a space. `terraform plan` cannot catch this, only apply fails.
     parameters = {
       imageTag = {
         type           = "String"

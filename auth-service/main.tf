@@ -251,7 +251,7 @@ locals {
 
   # auth_service_image with its tag stripped, so the SSM document's imageTag parameter can
   # select another tag of the same repository (rollback by sha).
-  auth_service_image_repo = try(regex("^(.*):[^:/]+$", var.auth_service_image)[0], var.auth_service_image)
+  auth_service_image_repo = try(regex("^([^@]*?)(?::[^:/@]+)?(?:@.+)?$", var.auth_service_image)[0], var.auth_service_image)
 
   auth_service_bootstrap_commands = [
     "set -euo pipefail",
@@ -546,6 +546,9 @@ resource "aws_ssm_document" "auth_service_bootstrap" {
   content = jsonencode({
     schemaVersion = "2.2"
     description   = "Install Docker and run auth-service on shared EC2 host."
+    # SSM rejects any bare `{{ word }}` that is not a declared parameter (e.g.
+    # `{{end}}`, `{{else}}`); docker --format templates in the script must contain
+    # a dot or a space. `terraform plan` cannot catch this, only apply fails.
     parameters = {
       imageTag = {
         type           = "String"
