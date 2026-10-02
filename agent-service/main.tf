@@ -165,6 +165,10 @@ locals {
   authnet_subnet     = "172.28.0.0/24"
   authnet_gateway_ip = "172.28.0.10"
 
+  # agent_service_image with its tag stripped, so the SSM document's imageTag parameter can
+  # select another tag of the same repository (rollback by sha).
+  agent_service_image_repo = try(regex("^([^@]*?)(?::[^:/@]+)?(?:@.+)?$", var.agent_service_image)[0], var.agent_service_image)
+
   agent_service_bootstrap_commands = [
     "set -euo pipefail",
     "cloud-init status --wait >/dev/null 2>&1 || true",
@@ -315,16 +319,29 @@ locals {
     # Image digest before and after the pull, as in fleet-service's and
     # auth-service's bootstraps: the tag is `:latest`, so the SSM command
     # output is what says whether this run changed the image.
-    "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.agent_service_image} 2>/dev/null || true)",
+    # Rollback by sha: the document's optional imageTag parameter (default
+    # `latest`, which is what CI and the association send) picks the tag of
+    # THIS service's own image only. The SSM allowedPattern already limits it
+    # to `latest` or sha-<40 hex>; the case below re-checks after substitution
+    # so a malformed value can never reach docker. With `latest` the image
+    # reference is exactly var.agent_service_image, as before.
+    "IMAGE_TAG='{{ imageTag }}'",
+    "case \"$IMAGE_TAG\" in latest|sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) echo 'FATAL: imageTag must be latest or sha-<40 hex>.' >&2; exit 1 ;; esac",
+    "if [ \"$IMAGE_TAG\" = latest ]; then IMAGE_REF='${var.agent_service_image}'; else IMAGE_REF='${local.agent_service_image_repo}':\"$IMAGE_TAG\"; fi",
+    "echo \"agent-service image: $IMAGE_REF\"",
+    "if [ \"$IMAGE_TAG\" != latest ]; then",
+    "  echo 'NOTE: pinned to '\"$IMAGE_TAG\"'; the container is replaced regardless of the digest comparison below.'",
+    "fi",
+    "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' \"$IMAGE_REF\" 2>/dev/null || true)",
     "echo \"agent-service image digest before pull: $IMAGE_DIGEST_BEFORE\"",
-    "docker pull ${var.agent_service_image}",
-    "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.agent_service_image} 2>/dev/null || true)",
+    "docker pull \"$IMAGE_REF\"",
+    "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' \"$IMAGE_REF\" 2>/dev/null || true)",
     "echo \"agent-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
     "docker rm -f agent-service >/dev/null 2>&1 || true",
     # Token verification is auth-service's (decision 21, meta#80); this service
     # holds no Clerk verification key.
     # AUTH_INTROSPECTION_URL is the FULL endpoint URL, used verbatim.
-    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.agent_service_image}",
+    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" \"$IMAGE_REF\"",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 6 the image refuses to start on a missing or bad
     # AUTH_INTROSPECTION_* value, and it reads them before waiting for MySQL.
@@ -363,6 +380,17 @@ resource "aws_ssm_document" "agent_service_bootstrap" {
   content = jsonencode({
     schemaVersion = "2.2"
     description   = "Install Docker and run agent-service, its MySQL container and st-gateway on the shared EC2 host."
+    # SSM rejects any bare `{{ word }}` that is not a declared parameter (e.g.
+    # `{{end}}`, `{{else}}`); docker --format templates in the script must contain
+    # a dot or a space. `terraform plan` cannot catch this, only apply fails.
+    parameters = {
+      imageTag = {
+        type           = "String"
+        description    = "Tag of the agent-service image to run: latest (default) or sha-<40 hex git sha> to roll back. Only this service's own image; sidecars are unchanged."
+        default        = "latest"
+        allowedPattern = "^(latest|sha-[0-9a-f]{40})$"
+      }
+    }
     mainSteps = [
       {
         action = "aws:runShellScript"

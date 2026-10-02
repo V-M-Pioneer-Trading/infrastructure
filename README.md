@@ -222,6 +222,51 @@ Revert this PR first and re-apply `automation-service/` with
 rotation in step 3 is the point of no return for the old key: once rotated, the
 old value is dead everywhere, and only the parameter above holds a working key.
 
+## Rolling back a service image
+
+The `agent-service` and `auth-service` bootstrap documents take an optional
+`imageTag` parameter (default `latest`, which is what CI and the associations
+send). It selects the tag of that service's **own** image only. Only `latest` or
+`sha-<40 hex git sha>` (CI's `type=sha,format=long`) is accepted; SSM rejects
+anything else before it reaches the host. Only commits pushed to `main` or a
+`v*` tag have a `sha-` image.
+
+What a rollback run does: it is the whole bootstrap, not just a re-pull.
+auth-service is replaced with the chosen tag. For agent-service, the MySQL and
+st-gateway containers are also recreated and st-gateway pulls `:latest`; only
+agent-service itself runs the chosen tag. An older image may not accept today's
+environment contract (introspection URL/secret, M2M keys, ...) and can
+crash-loop; the health poll then fails the command, so check the status below.
+
+Before rolling back, check the service repo's `main` CI deploy is idle,
+otherwise the two runs race.
+
+```bash
+INSTANCE_ID=i-011b6b82a9072a385
+SHA=<40-hex commit sha to roll back to>
+
+# agent-service
+command_id=$(aws ssm send-command --region eu-central-1   --document-name "agent-service-bootstrap-$INSTANCE_ID"   --targets "Key=InstanceIds,Values=$INSTANCE_ID"   --parameters imageTag=sha-$SHA   --timeout-seconds 600   --query Command.CommandId --output text)
+
+# auth-service
+command_id=$(aws ssm send-command --region eu-central-1   --document-name "auth-service-bootstrap-$INSTANCE_ID"   --targets "Key=InstanceIds,Values=$INSTANCE_ID"   --parameters imageTag=sha-$SHA   --timeout-seconds 600   --query Command.CommandId --output text)
+
+# wait, then verify (Success, not Failed/TimedOut)
+aws ssm get-command-invocation --region eu-central-1   --command-id "$command_id" --instance-id "$INSTANCE_ID"   --query Status --output text
+```
+
+A rollback is not sticky. It is undone by the next merge to `main` in the
+service repo, by any run of the bootstrap without `imageTag`, and by any
+`terraform apply` that changes either document: the `aws_ssm_association` has
+no schedule and re-runs the bootstrap with the default `latest` whenever its
+document changes.
+
+Applying the PR that introduced `imageTag`: expected plan is 2 documents
+changed, 0 to add/destroy. The apply re-runs both bootstraps with `latest`:
+auth-service restarts; agent-service's MySQL, st-gateway (re-pulled `:latest`)
+and agent-service are all recreated. Apply only when no CI deploy is running
+and nothing is rolled back.
+
 ## Local commands
 
 ```bash
