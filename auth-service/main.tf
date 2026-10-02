@@ -249,6 +249,10 @@ locals {
   # agent-service and automation-service set this convention.
   data_mount = "/data/auth-service"
 
+  # auth_service_image with its tag stripped, so the SSM document's imageTag parameter can
+  # select another tag of the same repository (rollback by sha).
+  auth_service_image_repo = try(regex("^(.*):[^:/]+$", var.auth_service_image)[0], var.auth_service_image)
+
   auth_service_bootstrap_commands = [
     "set -euo pipefail",
     "cloud-init status --wait >/dev/null 2>&1 || true",
@@ -437,11 +441,24 @@ locals {
     # whether this run changed the image. The PR runbook's pre-apply step
     # compares the running digest with the registry's `:latest` beforehand,
     # so the change is known before the apply rather than after.
-    "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.auth_service_image} 2>/dev/null || true)",
+    # Rollback by sha: the document's optional imageTag parameter (default
+    # `latest`, which is what CI and the association send) picks the tag of
+    # THIS service's own image only. The SSM allowedPattern already limits it
+    # to `latest` or sha-<40 hex>; the case below re-checks after substitution
+    # so a malformed value can never reach docker. With `latest` the image
+    # reference is exactly var.auth_service_image, as before.
+    "IMAGE_TAG='{{ imageTag }}'",
+    "case \"$IMAGE_TAG\" in latest|sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) echo 'FATAL: imageTag must be latest or sha-<40 hex>.' >&2; exit 1 ;; esac",
+    "if [ \"$IMAGE_TAG\" = latest ]; then IMAGE_REF='${var.auth_service_image}'; else IMAGE_REF='${local.auth_service_image_repo}':\"$IMAGE_TAG\"; fi",
+    "echo \"auth-service image: $IMAGE_REF\"",
+    "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' \"$IMAGE_REF\" 2>/dev/null || true)",
     "echo \"auth-service image digest before pull: $IMAGE_DIGEST_BEFORE\"",
-    "docker pull ${var.auth_service_image}",
-    "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.auth_service_image} 2>/dev/null || true)",
+    "docker pull \"$IMAGE_REF\"",
+    "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' \"$IMAGE_REF\" 2>/dev/null || true)",
     "echo \"auth-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
+    "if [ \"$IMAGE_TAG\" != latest ]; then",
+    "  echo 'NOTE: pinned to '\"$IMAGE_TAG\"'; the container is replaced regardless of the digest comparison below.'",
+    "fi",
     "if [ \"$IMAGE_DIGEST_BEFORE\" != \"$IMAGE_DIGEST_AFTER\" ]; then",
     "  echo 'NOTE: the pull changed the image; this run deploys a different build than the one that was running.'",
     "else",
@@ -489,7 +506,7 @@ locals {
     # is observed rather than assumed.
     #
     # The SQLite data volume mount is unchanged.
-    "docker run -d --name auth-service --restart unless-stopped --network authnet --ip ${local.authnet_auth_service_ip} -p 127.0.0.1:${var.auth_service_port}:${var.auth_service_port} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" -e M2M_MACHINE_KEY_AUTOMATION_SERVICE=\"$M2M_MACHINE_KEY_AUTOMATION_SERVICE\" -e M2M_MACHINE_KEY_AI_SERVICE=\"$M2M_MACHINE_KEY_AI_SERVICE\" -e M2M_CALLER_SECRET_AUTOMATION_SERVICE=\"$M2M_CALLER_SECRET_AUTOMATION_SERVICE\" -e M2M_CALLER_SECRET_AI_SERVICE=\"$M2M_CALLER_SECRET_AI_SERVICE\" ${var.auth_service_image}",
+    "docker run -d --name auth-service --restart unless-stopped --network authnet --ip ${local.authnet_auth_service_ip} -p 127.0.0.1:${var.auth_service_port}:${var.auth_service_port} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" -e M2M_MACHINE_KEY_AUTOMATION_SERVICE=\"$M2M_MACHINE_KEY_AUTOMATION_SERVICE\" -e M2M_MACHINE_KEY_AI_SERVICE=\"$M2M_MACHINE_KEY_AI_SERVICE\" -e M2M_CALLER_SECRET_AUTOMATION_SERVICE=\"$M2M_CALLER_SECRET_AUTOMATION_SERVICE\" -e M2M_CALLER_SECRET_AI_SERVICE=\"$M2M_CALLER_SECRET_AI_SERVICE\" \"$IMAGE_REF\"",
     # `docker run -d` returning 0 only means the container was created. A bind
     # failure on 127.0.0.1:${var.auth_service_port}, or a config the service
     # refuses to start with, leaves the vault DOWN. With --restart
@@ -529,6 +546,14 @@ resource "aws_ssm_document" "auth_service_bootstrap" {
   content = jsonencode({
     schemaVersion = "2.2"
     description   = "Install Docker and run auth-service on shared EC2 host."
+    parameters = {
+      imageTag = {
+        type           = "String"
+        description    = "Tag of the auth-service image to run: latest (default) or sha-<40 hex git sha> to roll back. Only this service's own image; sidecars are unchanged."
+        default        = "latest"
+        allowedPattern = "^(latest|sha-[0-9a-f]{40})$"
+      }
+    }
     mainSteps = [
       {
         action = "aws:runShellScript"

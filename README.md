@@ -222,6 +222,29 @@ Revert this PR first and re-apply `automation-service/` with
 rotation in step 3 is the point of no return for the old key: once rotated, the
 old value is dead everywhere, and only the parameter above holds a working key.
 
+## Rolling back a service image
+
+The `agent-service` and `auth-service` bootstrap documents take an optional
+`imageTag` parameter (default `latest`, which is what CI and the associations
+send). It selects the tag of that service's **own** image only; agent-service's
+st-gateway and MySQL are unchanged. Only `latest` or `sha-<40 hex git sha>` (the
+tag CI publishes, `type=sha,format=long`) is accepted. Anything else is rejected
+by SSM before it reaches the host.
+
+```bash
+INSTANCE_ID=<shared EC2 instance id>
+SHA=<40-hex commit sha to roll back to>
+
+# agent-service
+aws ssm send-command --region eu-central-1   --document-name "agent-service-bootstrap-$INSTANCE_ID"   --targets "Key=InstanceIds,Values=$INSTANCE_ID"   --parameters imageTag=sha-$SHA   --timeout-seconds 600
+
+# auth-service
+aws ssm send-command --region eu-central-1   --document-name "auth-service-bootstrap-$INSTANCE_ID"   --targets "Key=InstanceIds,Values=$INSTANCE_ID"   --parameters imageTag=sha-$SHA   --timeout-seconds 600
+```
+
+The rollback is not sticky: the next merge to `main` in the service repo (or any
+run of the bootstrap without `imageTag`) deploys `:latest` again.
+
 ## Local commands
 
 ```bash
