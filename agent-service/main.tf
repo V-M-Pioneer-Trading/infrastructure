@@ -341,15 +341,17 @@ locals {
     # Token verification is auth-service's (decision 21, meta#80); this service
     # holds no Clerk verification key.
     # AUTH_INTROSPECTION_URL is the FULL endpoint URL, used verbatim.
+    #
     # Memory guard (agent-service#38, meta#103). The shared host is a t4g.small
     # (2 GiB) that also runs MySQL, st-gateway and the other services, and a
     # Node server whose client pipelines requests without reading the answers
     # grows its heap to 1-2 GiB. --memory 512m caps the container (the kernel
     # OOM-kills it and --restart unless-stopped restarts it, instead of starving
-    # the neighbours); --memory-swap equal to it forbids swap. NODE_OPTIONS
-    # keeps V8's old space at 384 MiB so a leak ends in a Node OOM inside the
-    # cap; the other ~128 MiB is for young generation, buffers and runtime.
-    # The Go image ignores NODE_OPTIONS.
+    # the neighbours); --memory-swap equal to it forbids swap. Node 24 already
+    # reads the cgroup limit, so under 512m its heap defaults to about 259 MiB;
+    # NODE_OPTIONS raises that to 384 MiB explicitly. The remaining ~128 MiB is
+    # for code, native memory, Buffers and the mysql2 pool (the young generation
+    # is only about 3 MiB). The Go image ignores NODE_OPTIONS.
     "docker run -d --name agent-service --restart unless-stopped --network host --memory 512m --memory-swap 512m -e NODE_OPTIONS=--max-old-space-size=384 -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" \"$IMAGE_REF\"",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 6 the image refuses to start on a missing or bad
@@ -373,7 +375,7 @@ locals {
     "done",
     "if [ \"$AGENT_HEALTHY\" != yes ]; then",
     "  echo 'FATAL: agent-service did not answer GET /health on 127.0.0.1:${var.agent_service_port} within ~90s of docker run. Container state, restart count and the last 50 log lines follow.' >&2",
-    "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} err={{.State.Error}}' agent-service >&2 2>/dev/null || echo 'no such container' >&2",
+    "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} err={{.State.Error}}' agent-service >&2 2>/dev/null || echo 'no such container' >&2",
     "  docker logs --tail 50 agent-service >&2 2>&1 || true",
     "  exit 1",
     "fi",
