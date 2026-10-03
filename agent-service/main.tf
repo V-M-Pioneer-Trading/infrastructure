@@ -341,7 +341,16 @@ locals {
     # Token verification is auth-service's (decision 21, meta#80); this service
     # holds no Clerk verification key.
     # AUTH_INTROSPECTION_URL is the FULL endpoint URL, used verbatim.
-    "docker run -d --name agent-service --restart unless-stopped --network host -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" \"$IMAGE_REF\"",
+    # Memory guard (agent-service#38, meta#103). The shared host is a t4g.small
+    # (2 GiB) that also runs MySQL, st-gateway and the other services, and a
+    # Node server whose client pipelines requests without reading the answers
+    # grows its heap to 1-2 GiB. --memory 512m caps the container (the kernel
+    # OOM-kills it and --restart unless-stopped restarts it, instead of starving
+    # the neighbours); --memory-swap equal to it forbids swap. NODE_OPTIONS
+    # keeps V8's old space at 384 MiB so a leak ends in a Node OOM inside the
+    # cap; the other ~128 MiB is for young generation, buffers and runtime.
+    # The Go image ignores NODE_OPTIONS.
+    "docker run -d --name agent-service --restart unless-stopped --network host --memory 512m --memory-swap 512m -e NODE_OPTIONS=--max-old-space-size=384 -e MYSQL_HOST=localhost -e MYSQL_PORT=3306 -e MYSQL_USER=user -e MYSQL_PASSWORD=\"$MYSQL_APP_PASSWORD\" -e MYSQL_DATABASE=vnm-agent-db -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e ST_GATEWAY_URL=http://localhost:${var.gateway_port} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" \"$IMAGE_REF\"",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 6 the image refuses to start on a missing or bad
     # AUTH_INTROSPECTION_* value, and it reads them before waiting for MySQL.
