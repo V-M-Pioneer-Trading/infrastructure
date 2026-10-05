@@ -152,8 +152,10 @@ automation-service Machine key. Set `INSTANCE_ID` (the `ec2_instance_id`) and
      `aws ssm describe-instance-associations-status --region eu-central-1 --instance-id "$INSTANCE_ID"`.
    - `docker logs automation-service` on the host shows a successful startup
      token fetch from auth-service and no `m2m-token` errors.
-   - Check the autopilot status. It is held in memory only, so the restart
-     returns it to disarmed; re-arm it if it was armed.
+   - Check the autopilot status. Since automation-service#46 it is persisted,
+     and a restart brings an armed or paused autopilot back in shadow, never
+     live, with an `autopilot_resumed_in_shadow` anomaly. Re-arm live if it was
+     trading.
 3. Rotate the key. Rotating in Clerk revokes the old key at once, while
    auth-service still holds it in its environment, so keep the gap short. No M2M
    outage follows: automation-service's cached JWT stays valid offline until its

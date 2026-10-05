@@ -275,6 +275,10 @@ locals {
     # fails. `docker rm -f` alone is SIGKILL and skips all of it. On a first
     # boot there is no container, hence `|| true`.
     "docker stop -t 9 automation-service >/dev/null 2>&1 || true",
+    # Postgres is stopped first (the image's STOPSIGNAL is SIGINT: a fast
+    # shutdown with a checkpoint), so the new container starts clean instead
+    # of running WAL crash recovery after a SIGKILL.
+    "docker stop -t 30 automation-service-postgres >/dev/null 2>&1 || true",
     "docker rm -f automation-service-postgres >/dev/null 2>&1 || true",
     "docker run -d --name automation-service-postgres --restart unless-stopped --network host -v /data/automation-service-postgres/pgdata:/var/lib/postgresql/data -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=\"$POSTGRES_PASSWORD\" -e POSTGRES_DB=automation postgres:16-alpine",
     "for _ in $(seq 1 30); do docker exec automation-service-postgres pg_isready -U postgres >/dev/null 2>&1 && break; sleep 5; done",
