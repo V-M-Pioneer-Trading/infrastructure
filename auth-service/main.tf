@@ -513,8 +513,10 @@ locals {
     # 256m is generous; it is half of agent-service's 512m. The kernel
     # OOM-kills a runaway and --restart unless-stopped restarts it instead of
     # starving the neighbours; --memory-swap equal to --memory forbids swap.
-    # NODE_OPTIONS caps the V8 old space at 192 MiB, leaving ~64 MiB for code,
-    # native memory and Buffers, so V8 collects before the cgroup kills.
+    # The cgroup is the real limit: request bodies are Buffers outside the V8
+    # heap. NODE_OPTIONS caps the old space at 192 MiB as a second guard.
+    # Measured on the TS image: idle ~28 MiB, introspect bursts under 90 MiB;
+    # only many concurrent 1 MiB operator bodies (agent:reset session) reach it.
     # The Go image ignores NODE_OPTIONS.
     "docker run -d --name auth-service --restart unless-stopped --network authnet --memory 256m --memory-swap 256m -e NODE_OPTIONS=--max-old-space-size=192 --ip ${local.authnet_auth_service_ip} -p 127.0.0.1:${var.auth_service_port}:${var.auth_service_port} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" -e M2M_MACHINE_KEY_AUTOMATION_SERVICE=\"$M2M_MACHINE_KEY_AUTOMATION_SERVICE\" -e M2M_MACHINE_KEY_AI_SERVICE=\"$M2M_MACHINE_KEY_AI_SERVICE\" -e M2M_CALLER_SECRET_AUTOMATION_SERVICE=\"$M2M_CALLER_SECRET_AUTOMATION_SERVICE\" -e M2M_CALLER_SECRET_AI_SERVICE=\"$M2M_CALLER_SECRET_AI_SERVICE\" \"$IMAGE_REF\"",
     # `docker run -d` returning 0 only means the container was created. A bind
