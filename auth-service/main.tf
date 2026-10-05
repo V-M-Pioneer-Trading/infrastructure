@@ -506,7 +506,19 @@ locals {
     # is observed rather than assumed.
     #
     # The SQLite data volume mount is unchanged.
-    "docker run -d --name auth-service --restart unless-stopped --network authnet --ip ${local.authnet_auth_service_ip} -p 127.0.0.1:${var.auth_service_port}:${var.auth_service_port} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" -e M2M_MACHINE_KEY_AUTOMATION_SERVICE=\"$M2M_MACHINE_KEY_AUTOMATION_SERVICE\" -e M2M_MACHINE_KEY_AI_SERVICE=\"$M2M_MACHINE_KEY_AI_SERVICE\" -e M2M_CALLER_SECRET_AUTOMATION_SERVICE=\"$M2M_CALLER_SECRET_AUTOMATION_SERVICE\" -e M2M_CALLER_SECRET_AI_SERVICE=\"$M2M_CALLER_SECRET_AI_SERVICE\" \"$IMAGE_REF\"",
+    #
+    # Memory guard (auth-service#17, meta#103). The shared host is a t4g.small
+    # (2 GiB) that also runs MySQL, Postgres, the navigation JVM and the other
+    # services. auth-service is small (one SQLite file, an M2M token cache), so
+    # 256m is generous; it is half of agent-service's 512m. The kernel
+    # OOM-kills a runaway and --restart unless-stopped restarts it instead of
+    # starving the neighbours; --memory-swap equal to --memory forbids swap.
+    # The cgroup is the real limit: request bodies are Buffers outside the V8
+    # heap. NODE_OPTIONS caps the old space at 192 MiB as a second guard.
+    # Measured on the TS image: idle ~28 MiB, introspect bursts under 90 MiB;
+    # only many concurrent 1 MiB operator bodies (agent:reset session) reach it.
+    # The Go image ignores NODE_OPTIONS.
+    "docker run -d --name auth-service --restart unless-stopped --network authnet --memory 256m --memory-swap 256m -e NODE_OPTIONS=--max-old-space-size=192 --ip ${local.authnet_auth_service_ip} -p 127.0.0.1:${var.auth_service_port}:${var.auth_service_port} -v ${local.data_mount}:/data -e SQLITE_DB_PATH=/data/auth.db -e PORT=${var.auth_service_port} -e ST_GATEWAY_URL=http://st-gateway:${local.st_gateway_port} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e CLERK_JWT_KEY=\"$CLERK_JWT_KEY\" -e CLERK_ISSUER=${var.clerk_issuer} -e AUTH_SERVICE_SHARED_SECRET=\"$AUTH_SERVICE_SHARED_SECRET\" -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" -e M2M_MACHINE_KEY_AUTOMATION_SERVICE=\"$M2M_MACHINE_KEY_AUTOMATION_SERVICE\" -e M2M_MACHINE_KEY_AI_SERVICE=\"$M2M_MACHINE_KEY_AI_SERVICE\" -e M2M_CALLER_SECRET_AUTOMATION_SERVICE=\"$M2M_CALLER_SECRET_AUTOMATION_SERVICE\" -e M2M_CALLER_SECRET_AI_SERVICE=\"$M2M_CALLER_SECRET_AI_SERVICE\" \"$IMAGE_REF\"",
     # `docker run -d` returning 0 only means the container was created. A bind
     # failure on 127.0.0.1:${var.auth_service_port}, or a config the service
     # refuses to start with, leaves the vault DOWN. With --restart
@@ -530,7 +542,7 @@ locals {
     "done",
     "if [ \"$AUTH_HEALTHY\" != yes ]; then",
     "  echo 'FATAL: auth-service did not answer GET /health on 127.0.0.1:${var.auth_service_port} within ~90s of docker run. The credential vault and the introspection route are DOWN on this host. Container state, restart count and the last 50 log lines follow.' >&2",
-    "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} err={{.State.Error}}' auth-service >&2 2>/dev/null || echo 'no such container' >&2",
+    "  docker inspect -f 'state={{.State.Status}} running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} err={{.State.Error}}' auth-service >&2 2>/dev/null || echo 'no such container' >&2",
     "  docker logs --tail 50 auth-service >&2 2>&1 || true",
     "  exit 1",
     "fi",
