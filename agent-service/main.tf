@@ -262,6 +262,19 @@ locals {
     # the three authnet stacks' bootstraps runs first actually creates it.
     "docker network inspect authnet >/dev/null 2>&1 || docker network create --subnet ${local.authnet_subnet} authnet",
     "docker pull ${var.gateway_image}",
+    # Stop st-gateway before replacing it, so SIGTERM runs its graceful shutdown
+    # (answer Connection: close, stop accepting, finish in-flight calls for up to
+    # 8 s, exit 0; exit 1 if the 8 s bound dropped some) instead of `docker rm -f`
+    # SIGKILLing it mid-request. -t 9 is the SIGKILL backstop and sits above the
+    # gateway's 8 s bound, so a forced close can finish and log first. Costs up to
+    # 8 s of extra downtime per deploy while in-flight game calls drain; a quiet
+    # gateway stops in well under a second. `|| true`: no container yet (first
+    # deploy), or already stopped.
+    "docker stop -t 9 st-gateway >/dev/null 2>&1 || true",
+    # The stopped container's exit code (0 clean drain, 1 bound hit, 137 SIGKILLed)
+    # and last log lines, which `docker rm -f` would otherwise discard.
+    "echo \"st-gateway stopped: exit=$(docker inspect -f '{{.State.ExitCode}}' st-gateway 2>/dev/null)\"",
+    "docker logs --tail 3 st-gateway 2>&1 || true",
     "docker rm -f st-gateway >/dev/null 2>&1 || true",
     # authnet, not host — decision 9. Still publishes on 127.0.0.1 so
     # agent-service, navigation-service, fleet-service and automation-service
