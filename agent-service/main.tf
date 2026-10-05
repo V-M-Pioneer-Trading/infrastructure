@@ -271,6 +271,10 @@ locals {
     # gateway stops in well under a second. `|| true`: no container yet (first
     # deploy), or already stopped.
     "docker stop -t 9 st-gateway >/dev/null 2>&1 || true",
+    # The stopped container's exit code (0 clean drain, 1 bound hit, 137 SIGKILLed)
+    # and last log lines, which `docker rm -f` would otherwise discard.
+    "echo \"st-gateway stopped: exit=$(docker inspect -f '{{.State.ExitCode}}' st-gateway 2>/dev/null)\"",
+    "docker logs --tail 3 st-gateway 2>&1 || true",
     "docker rm -f st-gateway >/dev/null 2>&1 || true",
     # authnet, not host — decision 9. Still publishes on 127.0.0.1 so
     # agent-service, navigation-service, fleet-service and automation-service
