@@ -256,9 +256,8 @@ locals {
     "[ -n \"$POSTGRES_PASSWORD\" ] || { echo 'FATAL: POSTGRES_PASSWORD is empty.' >&2; exit 1; }",
     "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
     "[ -n \"$AUTH_M2M_CALLER_SECRET\" ] || { echo 'FATAL: AUTH_M2M_CALLER_SECRET is empty.' >&2; exit 1; }",
-    "docker rm -f automation-service-postgres >/dev/null 2>&1 || true",
-    "docker run -d --name automation-service-postgres --restart unless-stopped --network host -v /data/automation-service-postgres/pgdata:/var/lib/postgresql/data -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=\"$POSTGRES_PASSWORD\" -e POSTGRES_DB=automation postgres:16-alpine",
-    "for _ in $(seq 1 30); do docker exec automation-service-postgres pg_isready -U postgres >/dev/null 2>&1 && break; sleep 5; done",
+    # Pulled before anything is stopped, so a failed pull (set -e) leaves the
+    # running service and its database untouched.
     # Image digest before and after the pull, as in auth-service's bootstrap:
     # the tag is `:latest`, so the SSM command output is what says whether
     # this run changed the image.
@@ -267,6 +266,22 @@ locals {
     "docker pull ${var.automation_service_image}",
     "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.automation_service_image} 2>/dev/null || true)",
     "echo \"automation-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
+    # Graceful stop (automation-service#46) BEFORE anything else is replaced.
+    # `docker stop` sends SIGTERM, which the service now handles: it persists
+    # any in-flight arm/pause/abort, drains its scheduler ticks and closes its
+    # pool, within an 8 s deadline; -t 9 is the SIGKILL fallback. It must come
+    # before Postgres is recreated below: the app needs its database to finish
+    # those writes, and with Postgres force-removed under it the shutdown
+    # fails. `docker rm -f` alone is SIGKILL and skips all of it. On a first
+    # boot there is no container, hence `|| true`.
+    "docker stop -t 9 automation-service >/dev/null 2>&1 || true",
+    # Postgres is stopped first (the image's STOPSIGNAL is SIGINT: a fast
+    # shutdown with a checkpoint), so the new container starts clean instead
+    # of running WAL crash recovery after a SIGKILL.
+    "docker stop -t 30 automation-service-postgres >/dev/null 2>&1 || true",
+    "docker rm -f automation-service-postgres >/dev/null 2>&1 || true",
+    "docker run -d --name automation-service-postgres --restart unless-stopped --network host -v /data/automation-service-postgres/pgdata:/var/lib/postgresql/data -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=\"$POSTGRES_PASSWORD\" -e POSTGRES_DB=automation postgres:16-alpine",
+    "for _ in $(seq 1 30); do docker exec automation-service-postgres pg_isready -U postgres >/dev/null 2>&1 && break; sleep 5; done",
     "docker rm -f automation-service >/dev/null 2>&1 || true",
     # Token verification is auth-service's (decision 21, meta#80); this service
     # holds no Clerk verification key.
