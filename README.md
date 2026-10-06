@@ -298,6 +298,7 @@ To enable it, run these steps in order, in **PowerShell 7**. First set
 
    ```powershell
    Remove-Variable token, updates
+   $Error.Clear()   # a failed call leaves its error record, request URI (and token) included, in $Error
    ```
 
 6. Set the format and the chat id in the stack's git-ignored
@@ -340,6 +341,9 @@ To enable it, run these steps in order, in **PowerShell 7**. First set
      If it has one, the line gives only the HTTP status and Telegram's
      `error_code`. `400 error_code 400` usually means a wrong chat id, or a
      chat that never sent `/start`. `401` or `404` means a wrong token.
+     `403 error_code 403` means the bot was blocked, or is not (or no longer)
+     in the group; for an `@channel` the bot must be a channel admin. A group
+     upgraded to a supergroup gets a new `-100...` id: redo step 5.
 
 Rotating the token: send `/revoke` to @BotFather, redo step 3 with
 `--overwrite`, then redeploy. Terraform does not see the value.

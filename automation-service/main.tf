@@ -317,7 +317,7 @@ locals {
     "  export ANOMALY_WEBHOOK_FORMAT=${var.anomaly_webhook_format}",
     "  ANOMALY_WEBHOOK_DOCKER_ENV=\"-e ANOMALY_WEBHOOK_URL -e ANOMALY_WEBHOOK_FORMAT\"",
     "  if [ \"$ANOMALY_WEBHOOK_FORMAT\" = telegram ]; then",
-    "    printf '%s' \"$ANOMALY_WEBHOOK_URL\" | grep -Eq '^https://api\\.telegram\\.org/bot[0-9]+:[A-Za-z0-9_-]+/sendMessage$' || { echo 'FATAL: SSM parameter ${local.anomaly_webhook_url_parameter_name} is not https://api.telegram.org/bot<token>/sendMessage; the running containers are untouched.' >&2; exit 1; }",
+    "    [ \"$(printf '%s' \"$ANOMALY_WEBHOOK_URL\" | wc -l)\" -eq 0 ] && printf '%s' \"$ANOMALY_WEBHOOK_URL\" | grep -Eq '^https://api\\.telegram\\.org/bot[0-9]+:[A-Za-z0-9_-]+/sendMessage$' || { echo 'FATAL: SSM parameter ${local.anomaly_webhook_url_parameter_name} is not https://api.telegram.org/bot<token>/sendMessage; the running containers are untouched.' >&2; exit 1; }",
     "    export ANOMALY_TELEGRAM_CHAT_ID='${var.anomaly_telegram_chat_id}'",
     "    ANOMALY_WEBHOOK_DOCKER_ENV=\"$ANOMALY_WEBHOOK_DOCKER_ENV -e ANOMALY_TELEGRAM_CHAT_ID\"",
     "  fi",
