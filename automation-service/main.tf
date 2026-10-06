@@ -390,6 +390,12 @@ resource "aws_ssm_document" "automation_service_bootstrap" {
       }
     ]
   })
+
+  # A new document version is what makes the association re-run the bootstrap
+  # on an existing deployment, so the version must not exist before the grant
+  # its script relies on (the SSM reads, the optional webhook URL included);
+  # a run that beat the policy would fail its reads and abort.
+  depends_on = [aws_iam_role_policy.shared_ec2_automation_service_ssm_parameters]
 }
 
 resource "aws_ssm_association" "automation_service_bootstrap" {
@@ -400,9 +406,8 @@ resource "aws_ssm_association" "automation_service_bootstrap" {
     values = [var.ec2_instance_id]
   }
 
-  # The policy too: the bootstrap reads the SSM parameters it grants, and an
-  # association run that beat a policy change would fail its reads (the
-  # optional webhook read included) and abort.
+  # The policy too, for a first create (no document change to wait on): the
+  # association's initial run reads the SSM parameters the policy grants.
   depends_on = [
     aws_volume_attachment.automation_service_postgres_data,
     aws_iam_role_policy.shared_ec2_automation_service_ssm_parameters,
