@@ -226,15 +226,17 @@ old value is dead everywhere, and only the parameter above holds a working key.
 
 ## Rolling back a service image
 
-The `agent-service` and `auth-service` bootstrap documents take an optional
-`imageTag` parameter (default `latest`, which is what CI and the associations
-send). It selects the tag of that service's **own** image only. Only `latest` or
-`sha-<40 hex git sha>` (CI's `type=sha,format=long`) is accepted; SSM rejects
+The `agent-service`, `auth-service`, `fleet-service` and `navigation-service`
+bootstrap documents take an optional `imageTag` parameter (default `latest`,
+which is what the associations send, and what CI sends until it passes the sha
+it built, meta#89). It selects the tag of that service's **own** image only.
+Only `latest` or `sha-<40 hex git sha>` (CI's `type=sha,format=long`) is accepted; SSM rejects
 anything else before it reaches the host. Only commits pushed to `main` or a
 `v*` tag have a `sha-` image.
 
 What a rollback run does: it is the whole bootstrap, not just a re-pull.
-auth-service is replaced with the chosen tag. For agent-service, the MySQL and
+auth-service, fleet-service and navigation-service are replaced with the
+chosen tag. For agent-service, the MySQL and
 st-gateway containers are also recreated and st-gateway pulls `:latest`; only
 agent-service itself runs the chosen tag. An older image may not accept today's
 environment contract (introspection URL/secret, M2M keys, ...) and can
@@ -253,13 +255,18 @@ command_id=$(aws ssm send-command --region eu-central-1   --document-name "agent
 # auth-service
 command_id=$(aws ssm send-command --region eu-central-1   --document-name "auth-service-bootstrap-$INSTANCE_ID"   --targets "Key=InstanceIds,Values=$INSTANCE_ID"   --parameters imageTag=sha-$SHA   --timeout-seconds 600   --query Command.CommandId --output text)
 
+# fleet-service / navigation-service: the same command with
+#   --document-name "fleet-service-bootstrap-$INSTANCE_ID"
+#   --document-name "navigation-service-bootstrap-$INSTANCE_ID"
+
 # wait, then verify (Success, not Failed/TimedOut)
 aws ssm get-command-invocation --region eu-central-1   --command-id "$command_id" --instance-id "$INSTANCE_ID"   --query Status --output text
 ```
 
 A rollback is not sticky. It is undone by the next merge to `main` in the
-service repo, by any run of the bootstrap without `imageTag`, and by any
-`terraform apply` that changes either document: the `aws_ssm_association` has
+service repo, by any run of the bootstrap without `imageTag` (for agent-service
+that includes every st-gateway deploy: st-gateway CI runs agent-service's
+document), and by any `terraform apply` that changes its document: the `aws_ssm_association` has
 no schedule and re-runs the bootstrap with the default `latest` whenever its
 document changes.
 
@@ -268,6 +275,13 @@ changed, 0 to add/destroy. The apply re-runs both bootstraps with `latest`:
 auth-service restarts; agent-service's MySQL, st-gateway (re-pulled `:latest`)
 and agent-service are all recreated. Apply only when no CI deploy is running
 and nothing is rolled back.
+
+Applying the PR that added it to fleet-service and navigation-service: each
+stack's plan is 1 document changed, 0 to add/destroy. The apply re-runs that
+bootstrap with `latest`, which recreates the fleet-service or
+navigation-service container. Apply both stacks before merging the service
+repos' CI change that sends `imageTag`: SSM rejects a parameter the document
+does not declare, so that deploy would fail.
 
 ## Local commands
 

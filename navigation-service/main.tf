@@ -55,6 +55,10 @@ resource "aws_iam_role_policy" "shared_ec2_navigation_service_ssm_parameters" {
 }
 
 locals {
+  # navigation_service_image with its tag stripped, so the SSM document's imageTag parameter
+  # can select another tag of the same repository (deploy or roll back by sha).
+  navigation_service_image_repo = try(regex("^([^@]*?)(?::[^:/@]+)?(?:@.+)?$", var.navigation_service_image)[0], var.navigation_service_image)
+
   navigation_service_bootstrap_commands = [
     "set -euo pipefail",
     "cloud-init status --wait >/dev/null 2>&1 || true",
@@ -121,12 +125,28 @@ locals {
     "AUTH_INTROSPECTION_SECRET=$(read_secure_parameter ${data.terraform_remote_state.auth_service.outputs.auth_introspection_secret_parameter_name}) || exit 1",
     "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
     # Image digest before and after the pull, as in fleet-service's and
-    # auth-service's bootstraps: the tag is `:latest`, so the SSM command
-    # output is what says whether this run changed the image.
-    "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.navigation_service_image} 2>/dev/null || true)",
+    # auth-service's bootstraps: with `:latest`, the SSM command output is
+    # what says whether this run changed the image.
+    # Pin by sha (meta#89): the document's optional imageTag parameter
+    # (default `latest`, which is what the association sends) picks the tag
+    # of the navigation-service image. CI sends the sha its run built; a
+    # manual send-command with an older sha rolls back. Same parameter,
+    # pattern and script as agent-service's, auth-service's and
+    # fleet-service's bootstraps. The SSM allowedPattern already limits it to
+    # `latest` or sha-<40 hex>; the case below re-checks after substitution so
+    # a malformed value can never reach docker. With `latest` the image
+    # reference is exactly var.navigation_service_image, as before.
+    "IMAGE_TAG='{{ imageTag }}'",
+    "case \"$IMAGE_TAG\" in latest|sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) echo 'FATAL: imageTag must be latest or sha-<40 hex>.' >&2; exit 1 ;; esac",
+    "if [ \"$IMAGE_TAG\" = latest ]; then IMAGE_REF='${var.navigation_service_image}'; else IMAGE_REF='${local.navigation_service_image_repo}':\"$IMAGE_TAG\"; fi",
+    "echo \"navigation-service image: $IMAGE_REF\"",
+    "if [ \"$IMAGE_TAG\" != latest ]; then",
+    "  echo 'NOTE: pinned to '\"$IMAGE_TAG\"'; the container is replaced.'",
+    "fi",
+    "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' \"$IMAGE_REF\" 2>/dev/null || true)",
     "echo \"navigation-service image digest before pull: $IMAGE_DIGEST_BEFORE\"",
-    "docker pull ${var.navigation_service_image}",
-    "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' ${var.navigation_service_image} 2>/dev/null || true)",
+    "docker pull \"$IMAGE_REF\"",
+    "IMAGE_DIGEST_AFTER=$(docker image inspect --format '{{join .RepoDigests \",\"}}' \"$IMAGE_REF\" 2>/dev/null || true)",
     "echo \"navigation-service image digest after pull:  $IMAGE_DIGEST_AFTER\"",
     "docker rm -f navigation-service >/dev/null 2>&1 || true",
     // --network host (not -p port:8080, unlike the pre-existing config): navigation-service calls
@@ -136,7 +156,7 @@ locals {
     // while investigating prod's /api/v1/systems/*/waypoints 500s).
     # Token verification is auth-service's (decision 21, meta#80); this service
     # holds no Clerk verification key.
-    "docker run -d --name navigation-service --restart unless-stopped --network host -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" ${var.navigation_service_image}",
+    "docker run -d --name navigation-service --restart unless-stopped --network host -v /data:/data -e SQLITE_DB_PATH=/data/nav.db -e SPRING_PROFILES_ACTIVE=prod -e ST_GATEWAY_URL=http://localhost:3002 -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" \"$IMAGE_REF\"",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 7 the image refuses to start on a missing or bad
     # AUTH_INTROSPECTION_* value. With --restart unless-stopped such a
@@ -266,6 +286,17 @@ resource "aws_ssm_document" "navigation_service_bootstrap" {
   content = jsonencode({
     schemaVersion = "2.2"
     description   = "Install Docker and run navigation-service on shared EC2 host."
+    # SSM rejects any bare `{{ word }}` that is not a declared parameter (e.g.
+    # `{{end}}`, `{{else}}`); docker --format templates in the script must contain
+    # a dot or a space. `terraform plan` cannot catch this, only apply fails.
+    parameters = {
+      imageTag = {
+        type           = "String"
+        description    = "Tag of the navigation-service image to run: latest (default) or sha-<40 hex git sha> (CI deploys the sha it built; an older sha rolls back)."
+        default        = "latest"
+        allowedPattern = "^(latest|sha-[0-9a-f]{40})$"
+      }
+    }
     mainSteps = [
       {
         action = "aws:runShellScript"
