@@ -38,6 +38,23 @@ variable "cors_allowed_origin" {
   default     = "https://spacetraders.radomskyi.com"
 }
 
+# automation-service#47. Not a secret: only the body shape. The URL itself is
+# the optional SSM SecureString automation-service-anomaly-webhook-url, read on
+# the host; this is passed to the container only when that parameter exists.
+# Needs an automation-service image that knows the variable (automation-service
+# PR for #47); an older image ignores it and posts the generic body, which
+# Discord and Slack reject.
+variable "anomaly_webhook_format" {
+  description = "Body format automation-service posts anomalies in: generic, discord or slack."
+  type        = string
+  default     = "generic"
+
+  validation {
+    condition     = contains(["generic", "discord", "slack"], var.anomaly_webhook_format)
+    error_message = "anomaly_webhook_format must be one of generic, discord, slack."
+  }
+}
+
 # No sensible default — the mining loop is tracer-bullet single-ship (meta#9),
 # so this pins which ship in the fleet actually runs it in prod.
 variable "mining_ship_symbol" {

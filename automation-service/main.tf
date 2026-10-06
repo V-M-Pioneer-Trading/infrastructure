@@ -58,6 +58,17 @@ data "terraform_remote_state" "auth_service" {
   }
 }
 
+data "aws_caller_identity" "current" {}
+
+# automation-service#47: where anomalies are paged (a Discord or Slack incoming
+# webhook). OPTIONAL, and created by hand, never by Terraform: anyone holding
+# the URL can post to the channel, and a Terraform-managed value would sit in
+# state. The bootstrap reads it on the host when it exists; without it,
+# anomalies are still recorded and served from /anomalies/digest.
+locals {
+  anomaly_webhook_url_parameter_name = "automation-service-anomaly-webhook-url"
+}
+
 # KMS resource-based matching needs the key ARN, not the alias ARN.
 data "aws_kms_alias" "ssm" {
   name = "alias/aws/ssm"
@@ -88,6 +99,9 @@ resource "aws_iam_role_policy" "shared_ec2_automation_service_ssm_parameters" {
         Action = "ssm:GetParameter"
         Resource = [
           aws_ssm_parameter.postgres_password.arn,
+          # Not a resource in this stack (see the local), so the ARN is built.
+          # Granting a read on a parameter that does not exist yet is harmless.
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${local.anomaly_webhook_url_parameter_name}",
         ]
       },
       {
@@ -256,6 +270,50 @@ locals {
     "[ -n \"$POSTGRES_PASSWORD\" ] || { echo 'FATAL: POSTGRES_PASSWORD is empty.' >&2; exit 1; }",
     "[ -n \"$AUTH_INTROSPECTION_SECRET\" ] || { echo 'FATAL: AUTH_INTROSPECTION_SECRET is empty.' >&2; exit 1; }",
     "[ -n \"$AUTH_M2M_CALLER_SECRET\" ] || { echo 'FATAL: AUTH_M2M_CALLER_SECRET is empty.' >&2; exit 1; }",
+    # automation-service#47: the anomaly webhook URL is optional. ParameterNotFound
+    # means "not configured" and the container gets neither variable (the
+    # service then records anomalies without paging). Any other failure
+    # (AccessDenied during IAM propagation, throttling) is retried like the
+    # required reads and then aborts with the running containers untouched,
+    # rather than silently dropping paging. The value is never echoed; the
+    # error file holds only the AWS CLI's stderr.
+    "read_optional_secure_parameter() {",
+    "  _param_name=\"$1\"",
+    "  _err_file=$(mktemp)",
+    "  _attempt=0",
+    "  while [ \"$_attempt\" -lt 12 ]; do",
+    "    _attempt=$((_attempt + 1))",
+    "    if _param_value=$(aws ssm get-parameter --region ${var.aws_region} --name \"$_param_name\" --with-decryption --query Parameter.Value --output text 2>\"$_err_file\"); then",
+    "      if [ -n \"$_param_value\" ] && [ \"$_param_value\" != None ]; then",
+    "        rm -f \"$_err_file\"",
+    "        printf '%s' \"$_param_value\"",
+    "        return 0",
+    "      fi",
+    "    elif grep -q ParameterNotFound \"$_err_file\"; then",
+    "      rm -f \"$_err_file\"",
+    "      return 0",
+    "    fi",
+    "    echo \"waiting for optional SSM parameter $_param_name to read back (attempt $_attempt/12)\" >&2",
+    "    sleep 5",
+    "  done",
+    "  echo \"FATAL: optional SSM parameter $_param_name exists but could not be read after ~60s; the running containers are untouched. Last AWS CLI error:\" >&2",
+    "  cat \"$_err_file\" >&2",
+    "  rm -f \"$_err_file\"",
+    "  return 1",
+    "}",
+    "ANOMALY_WEBHOOK_URL=$(read_optional_secure_parameter ${local.anomaly_webhook_url_parameter_name}) || exit 1",
+    # Passed as bare `-e NAME`, so docker copies the value from this shell's
+    # environment and the URL never appears on a command line. Word-split on
+    # purpose below; it holds only the two variable names.
+    "ANOMALY_WEBHOOK_DOCKER_ENV=\"\"",
+    "if [ -n \"$ANOMALY_WEBHOOK_URL\" ]; then",
+    "  export ANOMALY_WEBHOOK_URL",
+    "  export ANOMALY_WEBHOOK_FORMAT=${var.anomaly_webhook_format}",
+    "  ANOMALY_WEBHOOK_DOCKER_ENV=\"-e ANOMALY_WEBHOOK_URL -e ANOMALY_WEBHOOK_FORMAT\"",
+    "  echo 'Anomaly webhook configured (format ${var.anomaly_webhook_format}); anomalies will be paged.'",
+    "else",
+    "  echo 'SSM parameter ${local.anomaly_webhook_url_parameter_name} not found; anomalies are recorded and served from /anomalies/digest but not paged.'",
+    "fi",
     # Pulled before anything is stopped, so a failed pull (set -e) leaves the
     # running service and its database untouched.
     # Image digest before and after the pull, as in auth-service's bootstrap:
@@ -285,7 +343,7 @@ locals {
     "docker rm -f automation-service >/dev/null 2>&1 || true",
     # Token verification is auth-service's (decision 21, meta#80); this service
     # holds no Clerk verification key.
-    "docker run -d --name automation-service --restart unless-stopped --network host -e PORT=${var.automation_service_port} -e DATABASE_URL=\"postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/automation\" -e NAVIGATION_SERVICE_URL=http://localhost:${data.terraform_remote_state.navigation_service.outputs.navigation_service_port}/api/navigation/v1 -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e FLEET_SERVICE_URL=http://localhost:${data.terraform_remote_state.fleet_service.outputs.fleet_service_port}/api/fleet/v1 -e MINING_SHIP_SYMBOL=${var.mining_ship_symbol} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" -e AUTH_M2M_TOKEN_URL=${data.terraform_remote_state.auth_service.outputs.auth_m2m_token_url} -e AUTH_M2M_CALLER_SECRET=\"$AUTH_M2M_CALLER_SECRET\" ${var.automation_service_image}",
+    "docker run -d --name automation-service --restart unless-stopped --network host -e PORT=${var.automation_service_port} -e DATABASE_URL=\"postgres://postgres:$POSTGRES_PASSWORD@localhost:5432/automation\" -e NAVIGATION_SERVICE_URL=http://localhost:${data.terraform_remote_state.navigation_service.outputs.navigation_service_port}/api/navigation/v1 -e AGENT_SERVICE_URL=http://localhost:${data.terraform_remote_state.agent_service.outputs.agent_service_port}/api/agent/v1 -e FLEET_SERVICE_URL=http://localhost:${data.terraform_remote_state.fleet_service.outputs.fleet_service_port}/api/fleet/v1 -e MINING_SHIP_SYMBOL=${var.mining_ship_symbol} -e CORS_ALLOWED_ORIGIN=${var.cors_allowed_origin} -e AUTH_INTROSPECTION_URL=${data.terraform_remote_state.auth_service.outputs.auth_introspection_url} -e AUTH_INTROSPECTION_SECRET=\"$AUTH_INTROSPECTION_SECRET\" -e AUTH_M2M_TOKEN_URL=${data.terraform_remote_state.auth_service.outputs.auth_m2m_token_url} -e AUTH_M2M_CALLER_SECRET=\"$AUTH_M2M_CALLER_SECRET\" $ANOMALY_WEBHOOK_DOCKER_ENV ${var.automation_service_image}",
     # `docker run -d` returning 0 only means the container was created. From
     # meta#80 step 8 the image refuses to start on a missing or bad
     # AUTH_INTROSPECTION_* value. With --restart unless-stopped such a
@@ -332,6 +390,12 @@ resource "aws_ssm_document" "automation_service_bootstrap" {
       }
     ]
   })
+
+  # A new document version is what makes the association re-run the bootstrap
+  # on an existing deployment, so the version must not exist before the grant
+  # its script relies on (the SSM reads, the optional webhook URL included);
+  # a run that beat the policy would fail its reads and abort.
+  depends_on = [aws_iam_role_policy.shared_ec2_automation_service_ssm_parameters]
 }
 
 resource "aws_ssm_association" "automation_service_bootstrap" {
@@ -342,5 +406,10 @@ resource "aws_ssm_association" "automation_service_bootstrap" {
     values = [var.ec2_instance_id]
   }
 
-  depends_on = [aws_volume_attachment.automation_service_postgres_data]
+  # The policy too, for a first create (no document change to wait on): the
+  # association's initial run reads the SSM parameters the policy grants.
+  depends_on = [
+    aws_volume_attachment.automation_service_postgres_data,
+    aws_iam_role_policy.shared_ec2_automation_service_ssm_parameters,
+  ]
 }
