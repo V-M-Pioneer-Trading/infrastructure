@@ -60,10 +60,10 @@ data "terraform_remote_state" "auth_service" {
 
 data "aws_caller_identity" "current" {}
 
-# automation-service#47: where anomalies are paged (a Discord or Slack incoming
-# webhook). OPTIONAL, and created by hand, never by Terraform: anyone holding
-# the URL can post to the channel, and a Terraform-managed value would sit in
-# state. The bootstrap reads it on the host when it exists; without it,
+# automation-service#47: where anomalies are paged (a Telegram Bot API
+# sendMessage URL, the bot token in its path). OPTIONAL, and created by hand,
+# never by Terraform: anyone holding the URL controls the bot, and a
+# Terraform-managed value would sit in state. The bootstrap reads it on the host when it exists; without it,
 # anomalies are still recorded and served from /anomalies/digest.
 locals {
   anomaly_webhook_url_parameter_name = "automation-service-anomaly-webhook-url"
@@ -304,12 +304,23 @@ locals {
     "ANOMALY_WEBHOOK_URL=$(read_optional_secure_parameter ${local.anomaly_webhook_url_parameter_name}) || exit 1",
     # Passed as bare `-e NAME`, so docker copies the value from this shell's
     # environment and the URL never appears on a command line. Word-split on
-    # purpose below; it holds only the two variable names.
+    # purpose below; it holds only variable names. With telegram the chat id
+    # goes too (validated in variables.tf, so it is shell-safe), and the URL's
+    # shape is checked here, before anything is stopped: the service refuses
+    # to start on a malformed one, so a bad SSM value aborts the bootstrap
+    # with the running containers untouched instead. printf is a shell
+    # builtin, so the URL reaches grep on stdin, never on a command line, and
+    # the message never quotes it (the bot token is in its path).
     "ANOMALY_WEBHOOK_DOCKER_ENV=\"\"",
     "if [ -n \"$ANOMALY_WEBHOOK_URL\" ]; then",
     "  export ANOMALY_WEBHOOK_URL",
     "  export ANOMALY_WEBHOOK_FORMAT=${var.anomaly_webhook_format}",
     "  ANOMALY_WEBHOOK_DOCKER_ENV=\"-e ANOMALY_WEBHOOK_URL -e ANOMALY_WEBHOOK_FORMAT\"",
+    "  if [ \"$ANOMALY_WEBHOOK_FORMAT\" = telegram ]; then",
+    "    printf '%s' \"$ANOMALY_WEBHOOK_URL\" | grep -Eq '^https://api\\.telegram\\.org/bot[0-9]+:[A-Za-z0-9_-]+/sendMessage$' || { echo 'FATAL: SSM parameter ${local.anomaly_webhook_url_parameter_name} is not https://api.telegram.org/bot<token>/sendMessage; the running containers are untouched.' >&2; exit 1; }",
+    "    export ANOMALY_TELEGRAM_CHAT_ID='${var.anomaly_telegram_chat_id}'",
+    "    ANOMALY_WEBHOOK_DOCKER_ENV=\"$ANOMALY_WEBHOOK_DOCKER_ENV -e ANOMALY_TELEGRAM_CHAT_ID\"",
+    "  fi",
     "  echo 'Anomaly webhook configured (format ${var.anomaly_webhook_format}); anomalies will be paged.'",
     "else",
     "  echo 'SSM parameter ${local.anomaly_webhook_url_parameter_name} not found; anomalies are recorded and served from /anomalies/digest but not paged.'",

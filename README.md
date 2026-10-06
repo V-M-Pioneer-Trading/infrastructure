@@ -224,75 +224,125 @@ Revert this PR first and re-apply `automation-service/` with
 rotation in step 3 is the point of no return for the old key: once rotated, the
 old value is dead everywhere, and only the parameter above holds a working key.
 
-### automation-service anomaly webhook (optional)
+### automation-service anomaly pages to Telegram (optional)
 
 [automation-service#47](https://github.com/V-M-Pioneer-Trading/automation-service/issues/47).
-`automation-service-anomaly-webhook-url` is an **optional** SSM `SecureString`
-created by hand, never by Terraform: anyone holding the URL can post to the
-channel, so it must not land in state. The stack only grants the shared EC2
-role `ssm:GetParameter` on that name. The bootstrap reads it on the host:
+Anomalies are paged to a Telegram chat by a bot, through the Bot API's
+`sendMessage`. `automation-service-anomaly-webhook-url` is an **optional** SSM
+`SecureString` holding `https://api.telegram.org/bot<token>/sendMessage`. You
+create it by hand, never with Terraform: the bot token sits in the URL's path,
+and anyone holding it controls the bot, so it must not end up in state. The
+stack only grants the shared EC2 role `ssm:GetParameter` on that name. The
+bootstrap reads it on the host:
 
-- parameter absent (`ParameterNotFound`): the container gets neither
-  `ANOMALY_WEBHOOK_URL` nor `ANOMALY_WEBHOOK_FORMAT`; anomalies are recorded
-  and served from `/anomalies/digest` but not paged;
-- parameter present: both are passed (`-e NAME`, so the URL is never on a
-  command line), the format from `var.anomaly_webhook_format`
-  (`generic` | `discord` | `slack`, default `generic`);
-- any other read failure: retried for ~60 s, then the bootstrap aborts with
-  the running containers untouched.
+- **Parameter absent** (`ParameterNotFound`): the container gets none of the
+  anomaly variables. Anomalies are recorded and served from
+  `/anomalies/digest`, but not paged.
+- **Parameter present**: `ANOMALY_WEBHOOK_URL` and `ANOMALY_WEBHOOK_FORMAT` are
+  passed as `-e NAME`, so the URL is never on a command line. The format
+  comes from `var.anomaly_webhook_format` (`generic` | `telegram`, default
+  `generic`). With `telegram`, `ANOMALY_TELEGRAM_CHAT_ID` is passed too, from
+  `var.anomaly_telegram_chat_id`. Terraform requires that variable with
+  `telegram` and refuses it without. The bootstrap also checks the URL's shape
+  before stopping anything. A malformed URL aborts the bootstrap and leaves the
+  running containers untouched, and the error message does not quote the URL.
+- **Any other read failure**: retried for ~60 s, then the bootstrap aborts
+  with the running containers untouched.
 
-To enable it, in order. Set `INSTANCE_ID` (the `ec2_instance_id`) in your
-shell first.
+To enable it, run these steps in order, in **PowerShell 7**. First set
+`$INSTANCE_ID` (the stack's `ec2_instance_id` output).
 
-1. Confirm [automation-service#48](https://github.com/V-M-Pioneer-Trading/automation-service/pull/48)
-   (`ANOMALY_WEBHOOK_FORMAT` support) is merged and deployed. An older image
-   ignores the format and posts the generic body, which Discord and Slack
-   reject with 400 on every page.
-2. Create the webhook and store its URL. **AWS CLI v2 only** (`aws --version`
-   must say `aws-cli/2.`): CLI v1 treats an `https://` `--value` as a URL to
-   fetch and stores the *response* (for Discord, the webhook's JSON including
-   its token) instead of the URL.
+1. Confirm [automation-service#50](https://github.com/V-M-Pioneer-Trading/automation-service/pull/50)
+   (Telegram support) is merged and its CI deploy has finished. An older
+   image does not know `telegram`, so it **refuses to start** and
+   automation-service stays down until you fix it.
+2. Create the bot. In Telegram, open a chat with **@BotFather**, send
+   `/newbot`, and pick a display name and a username ending in `bot`. BotFather
+   replies with the token, `<digits>:<letters>`. Copy it to your clipboard
+   only. Do not paste it into chat, an issue or a file.
+3. Store the token-bearing URL in SSM. This needs **AWS CLI v2** (`aws --version`
+   must print `aws-cli/2.`). CLI v1 treats an `https://` `--value` as a URL to
+   fetch, so it would call Telegram and store the *response* instead of the
+   URL. Keep this PowerShell window open for steps 4 and 5, because they reuse
+   `$token`.
 
    ```powershell
    aws --version
-   $u = Read-Host -MaskInput 'webhook URL'
-   aws ssm put-parameter --name automation-service-anomaly-webhook-url --type SecureString --value $u
+   $token = Read-Host -MaskInput 'bot token'
+   $u = "https://api.telegram.org/bot$token/sendMessage"
+   aws ssm put-parameter --region eu-central-1 --name automation-service-anomaly-webhook-url --type SecureString --value $u
    Remove-Variable u
    ```
 
-3. Set the format in the stack's git-ignored `automation-service/terraform.tfvars`
-   (where `mining_ship_symbol` lives), **not** with `-var`:
+4. Let the bot write to you. From the owner's Telegram account, open the
+   bot (search its username) and press **Start**, which sends `/start`. To
+   page a group instead, add the bot to the group and send `/start@<botusername>`
+   there. With privacy mode on, a bot only sees commands addressed to it.
+5. Find the chat id. Nothing below prints the token: the URL is never echoed,
+   and the `catch` prints only the HTTP status.
 
-   ```hcl
-   anomaly_webhook_format = "discord" # or "slack"
+   ```powershell
+   try {
+     $updates = Invoke-RestMethod "https://api.telegram.org/bot$token/getUpdates"
+     $updates.result | ForEach-Object { $_.message.chat } | Where-Object { $_ } |
+       Select-Object id, type, username, title -Unique
+   } catch {
+     "getUpdates failed: HTTP $($_.Exception.Response.StatusCode.value__)"
+   }
    ```
 
-   A `-var` holds for one apply only; the next apply without it silently
-   reverts to `generic`, and the chat service then rejects every page.
-4. Do not apply while an automation-service CI deploy is in flight: CI re-runs
+   Use the `id` of the chat you just wrote from: a positive number for your
+   private chat, or a negative one (`-100...` for a supergroup) for a group.
+   An empty list means Telegram has no message for the bot yet. Repeat step 4,
+   then run this again. Updates expire after 24 hours. Then forget the token:
+
+   ```powershell
+   Remove-Variable token, updates
+   ```
+
+6. Set the format and the chat id in the stack's git-ignored
+   `automation-service/terraform.tfvars`, where `mining_ship_symbol` lives.
+   Do **not** pass them with `-var`:
+
+   ```hcl
+   anomaly_webhook_format   = "telegram"
+   anomaly_telegram_chat_id = "123456789" # the id from step 5, quoted
+   ```
+
+   A `-var` lasts for one apply only. The next apply without it silently
+   reverts to `generic` with no chat id, and Telegram then rejects every page.
+7. Do not apply while an automation-service CI deploy is in flight: CI re-runs
    the same bootstrap document, and two runs would race on the containers.
    Apply, saving the plan first:
 
-   ```bash
+   ```powershell
    terraform -chdir=automation-service plan -out=tfplan
    terraform -chdir=automation-service apply tfplan
    ```
 
-   The plan must say **0 to add, 2 to change, 0 to destroy**:
-   `aws_iam_role_policy.shared_ec2_automation_service_ssm_parameters` (one ARN
-   more) and `aws_ssm_document.automation_service_bootstrap` (new script). The
-   new document version makes the association re-run the bootstrap, which
-   **restarts automation-service and its Postgres container**. After the apply:
-   - The association shows Success:
-     `aws ssm describe-instance-associations-status --region eu-central-1 --instance-id "$INSTANCE_ID"`.
-     The bootstrap output says `Anomaly webhook configured (format discord)`.
-   - Check the autopilot status. A restart brings an armed or paused autopilot
-     back in **shadow**, never live, with an `autopilot_resumed_in_shadow`
-     anomaly, which is also the first page the new webhook should receive.
-     Re-arm live if it was trading.
+   The plan must say **0 to add, 2 to change, 0 to destroy** if #107 was
+   never applied: `aws_iam_role_policy.shared_ec2_automation_service_ssm_parameters`
+   (one more ARN) and `aws_ssm_document.automation_service_bootstrap` (new
+   script). If #107 is already applied, it is only the document (1 to
+   change). The new document version makes the association re-run the
+   bootstrap, which **restarts automation-service and its Postgres
+   container**. After the apply:
+   - Check the association shows Success:
+     `aws ssm describe-instance-associations-status --region eu-central-1 --instance-id $INSTANCE_ID`.
+     The bootstrap output says `Anomaly webhook configured (format telegram)`.
+     If it says `FATAL: SSM parameter ... is not https://api.telegram.org/bot<token>/sendMessage`,
+     redo step 3 with `--overwrite` and apply again.
+   - Check the autopilot status. A restart brings an armed or paused
+     autopilot back in **shadow**, never live, and raises an
+     `autopilot_resumed_in_shadow` anomaly. That anomaly is also the first
+     message the Telegram chat should receive. Re-arm live if it was trading.
+   - The container log must have no `anomaly webhook delivery failed` line.
+     If it has one, the line gives only the HTTP status and Telegram's
+     `error_code`. `400 error_code 400` usually means a wrong chat id, or a
+     chat that never sent `/start`. `401` or `404` means a wrong token.
 
-A later URL rotation needs only `put-parameter --overwrite` (CLI v2) and a
-redeploy; Terraform does not see the value.
+Rotating the token: send `/revoke` to @BotFather, redo step 3 with
+`--overwrite`, then redeploy. Terraform does not see the value.
 
 ## Rolling back a service image
 
