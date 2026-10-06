@@ -224,6 +224,36 @@ Revert this PR first and re-apply `automation-service/` with
 rotation in step 3 is the point of no return for the old key: once rotated, the
 old value is dead everywhere, and only the parameter above holds a working key.
 
+### automation-service anomaly webhook (optional)
+
+[automation-service#47](https://github.com/V-M-Pioneer-Trading/automation-service/issues/47).
+`automation-service-anomaly-webhook-url` is an **optional** SSM `SecureString`
+created by hand, never by Terraform: anyone holding the URL can post to the
+channel, so it must not land in state. The stack only grants the shared EC2
+role `ssm:GetParameter` on that name. The bootstrap reads it on the host:
+
+- parameter absent (`ParameterNotFound`): the container gets neither
+  `ANOMALY_WEBHOOK_URL` nor `ANOMALY_WEBHOOK_FORMAT`; anomalies are recorded
+  and served from `/anomalies/digest` but not paged;
+- parameter present: both are passed (`-e NAME`, so the URL is never on a
+  command line), the format from `var.anomaly_webhook_format`
+  (`generic` | `discord` | `slack`, default `generic`);
+- any other read failure: retried for ~60 s, then the bootstrap aborts with
+  the running containers untouched.
+
+To enable it (needs an automation-service image with `ANOMALY_WEBHOOK_FORMAT`
+support): create the webhook, then
+
+```powershell
+$u = Read-Host -MaskInput 'webhook URL'
+aws ssm put-parameter --name automation-service-anomaly-webhook-url --type SecureString --value $u
+Remove-Variable u
+```
+
+and apply `automation-service/` with `-var anomaly_webhook_format=discord`
+(or `slack`). A later URL rotation needs only `put-parameter --overwrite` and
+a redeploy; Terraform does not see the value.
+
 ## Rolling back a service image
 
 The `agent-service` and `auth-service` bootstrap documents take an optional
