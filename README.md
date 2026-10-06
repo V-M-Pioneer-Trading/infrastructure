@@ -241,18 +241,58 @@ role `ssm:GetParameter` on that name. The bootstrap reads it on the host:
 - any other read failure: retried for ~60 s, then the bootstrap aborts with
   the running containers untouched.
 
-To enable it (needs an automation-service image with `ANOMALY_WEBHOOK_FORMAT`
-support): create the webhook, then
+To enable it, in order. Set `INSTANCE_ID` (the `ec2_instance_id`) in your
+shell first.
 
-```powershell
-$u = Read-Host -MaskInput 'webhook URL'
-aws ssm put-parameter --name automation-service-anomaly-webhook-url --type SecureString --value $u
-Remove-Variable u
-```
+1. Confirm [automation-service#48](https://github.com/V-M-Pioneer-Trading/automation-service/pull/48)
+   (`ANOMALY_WEBHOOK_FORMAT` support) is merged and deployed. An older image
+   ignores the format and posts the generic body, which Discord and Slack
+   reject with 400 on every page.
+2. Create the webhook and store its URL. **AWS CLI v2 only** (`aws --version`
+   must say `aws-cli/2.`): CLI v1 treats an `https://` `--value` as a URL to
+   fetch and stores the *response* (for Discord, the webhook's JSON including
+   its token) instead of the URL.
 
-and apply `automation-service/` with `-var anomaly_webhook_format=discord`
-(or `slack`). A later URL rotation needs only `put-parameter --overwrite` and
-a redeploy; Terraform does not see the value.
+   ```powershell
+   aws --version
+   $u = Read-Host -MaskInput 'webhook URL'
+   aws ssm put-parameter --name automation-service-anomaly-webhook-url --type SecureString --value $u
+   Remove-Variable u
+   ```
+
+3. Set the format in the stack's git-ignored `automation-service/terraform.tfvars`
+   (where `mining_ship_symbol` lives), **not** with `-var`:
+
+   ```hcl
+   anomaly_webhook_format = "discord" # or "slack"
+   ```
+
+   A `-var` holds for one apply only; the next apply without it silently
+   reverts to `generic`, and the chat service then rejects every page.
+4. Do not apply while an automation-service CI deploy is in flight: CI re-runs
+   the same bootstrap document, and two runs would race on the containers.
+   Apply, saving the plan first:
+
+   ```bash
+   terraform -chdir=automation-service plan -out=tfplan
+   terraform -chdir=automation-service apply tfplan
+   ```
+
+   The plan must say **0 to add, 2 to change, 0 to destroy**:
+   `aws_iam_role_policy.shared_ec2_automation_service_ssm_parameters` (one ARN
+   more) and `aws_ssm_document.automation_service_bootstrap` (new script). The
+   new document version makes the association re-run the bootstrap, which
+   **restarts automation-service and its Postgres container**. After the apply:
+   - The association shows Success:
+     `aws ssm describe-instance-associations-status --region eu-central-1 --instance-id "$INSTANCE_ID"`.
+     The bootstrap output says `Anomaly webhook configured (format discord)`.
+   - Check the autopilot status. A restart brings an armed or paused autopilot
+     back in **shadow**, never live, with an `autopilot_resumed_in_shadow`
+     anomaly, which is also the first page the new webhook should receive.
+     Re-arm live if it was trading.
+
+A later URL rotation needs only `put-parameter --overwrite` (CLI v2) and a
+redeploy; Terraform does not see the value.
 
 ## Rolling back a service image
 

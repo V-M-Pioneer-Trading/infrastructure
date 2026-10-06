@@ -400,5 +400,11 @@ resource "aws_ssm_association" "automation_service_bootstrap" {
     values = [var.ec2_instance_id]
   }
 
-  depends_on = [aws_volume_attachment.automation_service_postgres_data]
+  # The policy too: the bootstrap reads the SSM parameters it grants, and an
+  # association run that beat a policy change would fail its reads (the
+  # optional webhook read included) and abort.
+  depends_on = [
+    aws_volume_attachment.automation_service_postgres_data,
+    aws_iam_role_policy.shared_ec2_automation_service_ssm_parameters,
+  ]
 }
