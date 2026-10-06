@@ -141,7 +141,7 @@ locals {
     "if [ \"$IMAGE_TAG\" = latest ]; then IMAGE_REF='${var.navigation_service_image}'; else IMAGE_REF='${local.navigation_service_image_repo}':\"$IMAGE_TAG\"; fi",
     "echo \"navigation-service image: $IMAGE_REF\"",
     "if [ \"$IMAGE_TAG\" != latest ]; then",
-    "  echo 'NOTE: pinned to '\"$IMAGE_TAG\"'; the container is replaced regardless of the digest comparison below.'",
+    "  echo 'NOTE: pinned to '\"$IMAGE_TAG\"'; the container is replaced.'",
     "fi",
     "IMAGE_DIGEST_BEFORE=$(docker image inspect --format '{{join .RepoDigests \",\"}}' \"$IMAGE_REF\" 2>/dev/null || true)",
     "echo \"navigation-service image digest before pull: $IMAGE_DIGEST_BEFORE\"",

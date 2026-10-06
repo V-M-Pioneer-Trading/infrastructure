@@ -229,8 +229,8 @@ old value is dead everywhere, and only the parameter above holds a working key.
 The `agent-service`, `auth-service`, `fleet-service` and `navigation-service`
 bootstrap documents take an optional `imageTag` parameter (default `latest`,
 which is what the associations send, and what CI sends until it passes the sha
-it built, meta#89). It selects the tag of that service's **own** image only. Only `latest` or
-`sha-<40 hex git sha>` (CI's `type=sha,format=long`) is accepted; SSM rejects
+it built, meta#89). It selects the tag of that service's **own** image only.
+Only `latest` or `sha-<40 hex git sha>` (CI's `type=sha,format=long`) is accepted; SSM rejects
 anything else before it reaches the host. Only commits pushed to `main` or a
 `v*` tag have a `sha-` image.
 
@@ -264,8 +264,9 @@ aws ssm get-command-invocation --region eu-central-1   --command-id "$command_id
 ```
 
 A rollback is not sticky. It is undone by the next merge to `main` in the
-service repo, by any run of the bootstrap without `imageTag`, and by any
-`terraform apply` that changes either document: the `aws_ssm_association` has
+service repo, by any run of the bootstrap without `imageTag` (for agent-service
+that includes every st-gateway deploy: st-gateway CI runs agent-service's
+document), and by any `terraform apply` that changes its document: the `aws_ssm_association` has
 no schedule and re-runs the bootstrap with the default `latest` whenever its
 document changes.
 
