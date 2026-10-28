@@ -5,3 +5,8 @@ crash.log
 *.tfvars
 *.tfvars.json
 tfplan*
+
+# Saved plans and state copies carry sensitive values; keep them out of `git add -A`.
+plan.bin
+*.tfplan
+*.tfstate*

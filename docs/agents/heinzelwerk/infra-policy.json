@@ -1,0 +1,10 @@
+{
+  "auto_apply_dirs": ["agent-service", "auth-service", "automation-service", "caddy", "ci-deploy-role", "fleet-service", "navigation-service"],
+  "max_changes": 20,
+  "allowed_delete_types": ["*"],
+  "protected_types": [
+    "aws_iam_*", "aws_vpc*",
+    "aws_ebs_volume", "aws_volume_attachment", "aws_dlm_lifecycle_policy",
+    "aws_ssm_parameter", "random_password"
+  ]
+}
