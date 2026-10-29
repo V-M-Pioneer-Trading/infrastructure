@@ -1,0 +1,29 @@
+# Team rules
+
+How heinzelwerk agents work in this repo. Mode rules (single repo vs workspace) live in the `heinzelwerk:team-modes` skill. This file holds only what is specific to this repo.
+
+- **Autonomy**: full. Agents merge and apply on their own; breakages are learnings. Secrets are never published (name the variable, never the value); the gate never merges its own policy.
+- **Infra paths**: `agent-service/`, `auth-service/`, `automation-service/`, `caddy/`, `ci-deploy-role/`, `fleet-service/`, `navigation-service/` (each stack is a prod environment; there is no dev/sandbox)
+- **Infra checks**:
+  - `for s in agent-service auth-service automation-service caddy ci-deploy-role fleet-service navigation-service; do (cd "$s" && terraform fmt -check -recursive && terraform init -backend=false -input=false && terraform validate) || exit 1; done`
+- **Infra policy**: `docs/agents/heinzelwerk/infra-policy.json`, enforced by the plugin's `tf-gate` (needs `jq`, not installed on this machine yet)
+- **Infra apply order** (provider before consumer, from `terraform_remote_state`): personal (other repo, mradomsky/infrastructure; read by all 7, e.g. `auth-service/main.tf:5`) → auth-service → navigation-service (`navigation-service/main.tf:19`), agent-service (`agent-service/main.tf:23`) → fleet-service (`fleet-service/main.tf:15,29`) → automation-service (`automation-service/main.tf:15,25,35,51`) → caddy (`caddy/main.tf:19,28,37,46,64`); ci-deploy-role after personal only (`ci-deploy-role/main.tf:9`)
+- **Infra secrets**: plan/refresh reads secrets in agent-service (`agent-service/main.tf:38-58`), auth-service (`auth-service/main.tf:26-108`; sensitive TF_VARs `auth-service/variables.tf:53-78`), automation-service (`automation-service/main.tf:77-86`): SecureString `aws_ssm_parameter` + `random_password`, values in state; every remote_state reader downloads the whole auth-service state (unverified). Full autonomy: agents may plan them; values stay on the machine. Claude Code auto-mode classifier has blocked `terraform apply` and SecureString reads in past sessions (unverified) · agent credentials can write to prod, everything (the one AWS account, `eu-central-1`, `auth-service/versions.tf:7`)
+- **Post-merge apply**: no CI apply job (`.github/workflows/terraform.yml:11-53` has only `validate`); tech-lead applies through the gate in the next run
+- **Verified against**: 71ccde2 2026-10-29 (checks and every ref in this file; retro bumps it)
+- **Coding standards**: none: smell baseline only; `terraform fmt -check -recursive` per stack (`.github/workflows/terraform.yml:44-45`)
+- **Risk areas** (validator reviews diffs touching these on Opus). Project-specific; each entry is a path/glob or a described kind of change, plus why it is risky:
+  - infra paths: always a risk area. Every stack is prod on one shared EC2 host (`README.md:3-11`)
+  - any `aws_ssm_document` change: the `aws_ssm_association` has no schedule and re-runs bootstrap on document change, restarting containers and their DBs (`README.md:391-395`, e.g. `caddy/main.tf:171-198`)
+  - applying while a service CI deploy runs: CI sends the same bootstrap document; two runs race on the containers (`README.md:134-136`)
+  - `imageTag` document parameter: apply the doc change before the service CI sends it, or SSM rejects the deploy (`README.md:403-408`)
+  - `ci-deploy-role/main.tf`: OIDC trust (`:50-66`, main-ref subjects) and SendCommand allowlist (`:88-99`); widening either lets more CI reach prod
+  - `caddy/Caddyfile.tftpl`: public routing (`:51-92`, `/auth/v1/token` deliberately unrouted) and the `X-Origin-Verify` 403 guard (`:30,38`); a mistake exposes backends or fails origin auth open
+  - `navigation-service/main.tf:203-210`: the single shared SG ingress rule (443 from the CloudFront prefix list) all backends sit behind
+  - EBS data volumes, attachments, DLM (`navigation-service/main.tf:212-274`, `agent-service/main.tf:91-152`, `auth-service/main.tf:150-211`, `automation-service/main.tf:121-186`): SQLite/MySQL/Postgres prod data, no `prevent_destroy` anywhere
+  - SecureString params and `random_password` (see **Infra secrets**): replacement rotates live secrets; old values persist in versioned state (`README.md:216-217`)
+  - state backend (`<stack>/versions.tf:4-9`, bucket `radomskyi-tfstate`, per-stack key): changing bucket/key orphans state or collides stacks
+  - CI matrix (`.github/workflows/terraform.yml:20-27`): required check names are the matrix values (`validate (<stack>)`); adding a stack blocks open PRs branched before it until rebased
+- **Contracts** (see team-modes **Contract changes**; validator checks every diff touching these):
+  - Infra outputs: every `<stack>/outputs.tf` (e.g. `auth-service/outputs.tf:1-60`, `navigation-service/outputs.tf:1-21`) · provider infra · consumers other stacks via `terraform_remote_state` (see **Infra apply order**) and service containers via bootstrap env (e.g. `automation-service/main.tf:357`)
+  - Consumed: "personal/terraform.tfstate" outputs `ec2_role_name` (`agent-service/main.tf:64`), `ec2_security_group_id` (`navigation-service/main.tf:205`), `ec2_instance_ip` (`agent-service/outputs.tf:8`), `ec2_instance_id` (`ci-deploy-role/main.tf:98`) · provider mradomsky/infrastructure (out of scope, private)
