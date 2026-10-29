@@ -16,7 +16,8 @@ Verified against 71ccde2 2026-10-29.
 - Every service stack = SSM Command document + association that runs the bootstrap on the host. `README.md:51-55`; e.g. `caddy/main.tf:171-198`
 - authnet 172.28.0.0/24 created idempotently by whichever of auth/agent/caddy bootstraps first. `auth-service/main.tf:238,297`; `caddy/main.tf:149`; `agent-service/main.tf:263`
 
-## Public reach (unauthenticated surface)
+## Public reach (routed through CloudFront + Caddy)
+- Routes are app-authenticated except health/status; agent-token and register are gated by `agent:reset` in auth-service. `../auth-service/src/controllers/operator.controller.ts:63,86`
 - No 0.0.0.0/0 in any `.tf`. Only ingress: TCP 443 from CloudFront origin-facing prefix list on the shared SG. `navigation-service/main.tf:194-210`
 - Prefix list = all of CloudFront, so Caddy 403s requests lacking `X-Origin-Verify`. `caddy/Caddyfile.tftpl:30,38`
 - Routed: `/api/{navigation,agent,fleet,automation}/*`, `/api/st-gateway/health`, `/api/auth/v1/{status,agent-token,register}`, `/api/auth/health`; else 404; `/auth/v1/token` deliberately unrouted. `caddy/Caddyfile.tftpl:51-92`
