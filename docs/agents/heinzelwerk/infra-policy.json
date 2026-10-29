@@ -12,7 +12,6 @@
   "allowed_delete_types": ["*"],
   "protected_types": [
     "aws_iam_*", "aws_vpc*",
-    "aws_vpc_security_group_ingress_rule",
     "aws_ebs_volume", "aws_volume_attachment", "aws_dlm_lifecycle_policy",
     "aws_ssm_parameter"
   ]
