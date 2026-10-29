@@ -81,3 +81,9 @@ Verified against 71ccde2 2026-10-29.
 - Stale: `ci-deploy-role/outputs.tf:2` says "three services"; agent/fleet comments say the SG rule covers 80/3001/8080 (now 443 only) `agent-service/main.tf:86-87`, `fleet-service/main.tf:63-64`; README stacks table omits auth-service `README.md:15-22`; `README.md:55` says `--network host` but auth, st-gateway, caddy use authnet
 - README hardcodes instance id. `README.md:373`
 - Runbooks are historical, step-ordered. `README.md:81-349`
+
+## Reference docs
+- `./README.md` "Secrets" and "auth-service secrets and machine tokens": read when adding or rotating a service secret (SSM names, writer, reader).
+- `./README.md` "automation-service anomaly pages to Telegram": read when enabling or rotating the anomaly page.
+- `caddy/README.md` "TLS to the origin" and "Prerequisites": read when rotating the `X-Origin-Verify` secret (`caddy/main.tf:83,152`).
+- `README.md:9-11`: read when auditing account-wide security (points to mradomsky/infrastructure docs/security-model.md, outside this workspace).
