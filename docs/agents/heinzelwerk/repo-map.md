@@ -14,7 +14,7 @@ Verified against 71ccde2 2026-10-29.
 - `caddy/`: edge proxy on authnet, `-p 443:443`, DNS-01 via Route53, image built on host with xcaddy. `caddy/main.tf:108-113,167`; `caddy/README.md:7-25`
 - `ci-deploy-role/`: IAM role `github-actions-ssm-deploy` for service CI. `ci-deploy-role/main.tf:71-74`
 - Every service stack = SSM Command document + association that runs the bootstrap on the host. `README.md:51-55`; e.g. `caddy/main.tf:171-198`
-- authnet 172.28.0.0/24 created idempotently by whichever of auth/agent/caddy bootstraps first. `auth-service/main.tf:238,297`; `caddy/main.tf:149`; `agent-service/main.tf:263`
+- authnet 172.28.0.0/24 created by whichever of auth/agent/caddy bootstraps first (inspect-or-create: safe to re-run, not race-safe; two concurrent first-time bootstraps can both try to create it and one fails under `set -euo pipefail`). `auth-service/main.tf:238,257,297`; `caddy/main.tf:149`; `agent-service/main.tf:263`
 
 ## Public reach (routed through CloudFront + Caddy)
 - Routes are app-authenticated except health/status; agent-token and register are gated by `agent:reset` in auth-service. `../auth-service/src/controllers/operator.controller.ts:63,86`
