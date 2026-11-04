@@ -5,3 +5,10 @@ crash.log
 *.tfvars
 *.tfvars.json
 tfplan*
+
+# heinzelwerk task worktrees
+.claude/worktrees/
+# Saved plans and state carry sensitive values (heinzelwerk tf-gate)
+plan.bin
+*.tfplan
+*.tfstate*
